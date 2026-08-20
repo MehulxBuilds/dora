@@ -49,3 +49,13 @@ func (s *state) exists(key Key) bool {
 func (s *state) len() int {
 	return len(s.data)
 }
+
+// keys returns a slice of all keys in the state.
+// The order is not guaranteed (map iteration order).
+func (s *state) keys() []Key {
+	result := make([]Key, 0, len(s.data))
+	for k := range s.data {
+		result = append(result, k)
+	}
+	return result
+}

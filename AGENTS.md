@@ -25,12 +25,12 @@ JSON is a serialization format, NOT the core architecture. The Value type is a d
 
 ```
 engine/
-  db.go          — DB struct, public API (Open, Set, Get, Delete, Exists, Len)
-  state.go       — state struct (internal), in-memory keyspace (map[Key]Value)
+  db.go          — DB struct, public API (Open, Close, Set, Get, Delete, Exists, Len, Keys), sync.RWMutex
+  state.go       — state struct (internal), in-memory keyspace (map[Key]Value), keys()
   key.go         — Key type alias (currently string)
   value.go       — Value type with typed constructors/accessors (Null, Boolean, Number, String, Array, Object)
   errors.go      — Sentinel errors (ErrKeyNotFound, ErrKeyEmpty)
-  db_test.go     — 10 tests covering DB operations
+  db_test.go     — 23 tests covering DB operations, concurrency, edge cases
   value_test.go  — 10 tests covering Value type, accessors, copy semantics
 ```
 
@@ -40,7 +40,7 @@ engine/
 2. **Key is `type Key = string`** (alias, not defined type). Keeps it simple. Can evolve later.
 3. **state is unexported.** Only DB is the public API surface. State is an internal implementation detail.
 4. **Constructors copy slices/maps** (NewArray, NewObject). Accessors also return copies. Values are immutable once created.
-5. **No concurrency control yet.** Phase 7 will add sync.RWMutex.
+5. **sync.RWMutex on DB**, not on state. State is a pure data structure; DB handles all synchronization. RLock for reads (Get, Exists, Len, Keys), Lock for writes (Set, Delete).
 6. **No persistence yet.** Phase 2 will add JSON persistence behind a storage abstraction.
 7. **No WAL, no transactions, no operations model yet.** These are Phases 3-6.
 
@@ -51,9 +51,15 @@ engine/
 - 20 tests, all passing
 - Purely in-memory, no persistence
 
+### Phase 1 — In-Memory Key-Value Engine (DONE)
+- Added sync.RWMutex to DB for concurrency safety
+- Added Keys() method (returns all keys, unordered)
+- Added Close() method (no-op now, lifecycle hook for Phase 2)
+- 33 tests total, all passing
+- New tests: concurrency (concurrent reads, writes, mixed read/write), operation sequences (set-delete-set, double delete), edge cases (special characters, unicode keys, nested values, null values), stress test (10k keys)
+
 ## Development Roadmap (Remaining)
 
-- **Phase 1** — In-memory Key-Value engine (SET/GET/DELETE/EXISTS with concurrency-safe design, more tests)
 - **Phase 2** — JSON Persistence (save/load state to disk behind abstraction)
 - **Phase 3** — Operation Model (explicit Operation struct, deterministic apply)
 - **Phase 4** — WAL (write-ahead log, mutation flow: validate -> create op -> write WAL -> apply)
