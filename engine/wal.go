@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -85,47 +84,95 @@ func (w *wal) append(op Operation) error {
 	return nil
 }
 
-// loadWALEntries reads all operations from an existing WAL file.
+// loadWALEntries reads all valid operations from an existing WAL file.
 //
 // Returns an empty slice if the WAL file does not exist (normal case
 // for a fresh database or after a clean shutdown that truncated the WAL).
 //
-// Returns an error if the file exists but contains corrupt entries.
-// Partial/incomplete lines (from crash mid-write) are not yet handled
-// here — that is a Phase 5 concern.
+// Recovery semantics: entries are parsed sequentially. If a corrupt or
+// incomplete entry is encountered (the expected result of a crash
+// mid-write), parsing stops at that point. All preceding entries are
+// valid — they were individually fsynced before the next operation began.
+//
+// When a partial entry is detected, it is removed from the WAL file by
+// truncating the file to the end of the last valid entry. This ensures
+// subsequent appends (after recovery) do not write after garbage bytes,
+// which would cause data loss on the next recovery cycle.
+//
+// The valid entries are NOT removed. They remain in the WAL until
+// Close() saves a snapshot and truncates the WAL. This protects against
+// a second crash before Close(): the entries can be replayed again.
 func loadWALEntries(path string) ([]Operation, error) {
-	f, err := os.Open(path)
+	content, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read WAL: %w", err)
 	}
-	defer f.Close()
+
+	if len(content) == 0 {
+		return nil, nil
+	}
 
 	var ops []Operation
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue // skip blank lines
+	pos := 0       // current read position in content
+	validEnd := 0  // byte offset past the last valid entry (for truncation)
+	needsRepair := false
+
+	for pos < len(content) {
+		// Find the next newline to extract a line.
+		lineEnd := pos
+		for lineEnd < len(content) && content[lineEnd] != '\n' {
+			lineEnd++
 		}
 
+		line := content[pos:lineEnd]
+
+		// Advance past the newline (if present).
+		nextPos := lineEnd
+		if nextPos < len(content) {
+			nextPos++
+		}
+
+		// Skip empty lines.
+		if len(line) == 0 {
+			pos = nextPos
+			validEnd = pos
+			continue
+		}
+
+		// Attempt to parse the entry.
 		var entry walEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			return nil, fmt.Errorf("WAL corrupt entry: %w", err)
+			// Partial or corrupt entry. With fsync-per-entry, only the
+			// last entry can be incomplete (crash mid-write). All
+			// preceding entries were fully synced. Stop here.
+			needsRepair = true
+			break
 		}
 
 		op, err := entryToOperation(entry)
 		if err != nil {
+			// Structurally valid JSON but semantically invalid (e.g.,
+			// unknown operation type, SET without value). This is real
+			// corruption, not a partial write.
 			return nil, err
 		}
+
 		ops = append(ops, op)
+		pos = nextPos
+		validEnd = pos
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("WAL scan: %w", err)
+	// If a partial entry was found, truncate the file to remove it.
+	// The valid entries remain intact for crash safety.
+	if needsRepair {
+		if err := os.Truncate(path, int64(validEnd)); err != nil {
+			return nil, fmt.Errorf("WAL repair: %w", err)
+		}
 	}
+
 	return ops, nil
 }
 

@@ -104,9 +104,16 @@ engine/
 - In-memory databases (Open("")) have no WAL — wal field is nil
 - WAL file location: `<db-path>.wal`
 
+### Phase 5 — Recovery (DONE)
+- loadWALEntries rewritten for crash tolerance: parses entries sequentially, stops at first corrupt/partial entry instead of returning a hard error
+- Partial entry repair: WAL file is truncated to the byte offset of the last valid entry, removing trailing garbage from crash mid-write
+- Valid entries are preserved in WAL after repair (not removed) — protects against a second crash before Close() saves a snapshot
+- Recovery guarantees: with fsync-per-entry, at most one entry (the last) can be incomplete; all preceding entries are fully durable
+- Semantic errors (unknown op type, SET without value) still return hard errors — these indicate real corruption, not partial writes
+- Replaced bufio.Scanner with os.ReadFile + manual byte-offset tracking for precise truncation positioning
+
 ## Development Roadmap (Remaining)
 
-- **Phase 5** — Recovery (crash recovery via WAL replay)
 - **Phase 6** — Transactions (BEGIN/COMMIT/ROLLBACK, atomicity)
 - **Phase 7** — Concurrency (race detector testing, advanced locking if needed)
 - **Phase 8** — Snapshots (periodic checkpoints, snapshot + WAL replay for recovery)
