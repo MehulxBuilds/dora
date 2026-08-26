@@ -14,6 +14,8 @@ Public Go API  (db.go)
       |
   Operation Model  (operation.go)
       |
+  WAL  (wal.go)
+      |
   Storage interface  (storage.go)
       |
   JSON Storage  (json_storage.go)
@@ -33,6 +35,7 @@ JSON is a serialization format, NOT the core architecture. The Value type is a d
 engine/
   db.go            — DB struct, public API (Open, Close, Set, Get, Delete, Exists, Len, Keys), sync.RWMutex
   operation.go     — OpType (SET, DELETE), Operation struct, state.apply (deterministic state transition)
+  wal.go           — WAL struct, append (write+fsync), loadWALEntries (replay), truncate, JSON Lines format
   state.go         — state struct (internal), in-memory keyspace, snapshot/load
   key.go           — Key type alias (currently string)
   value.go         — Value type with typed constructors/accessors
@@ -40,9 +43,6 @@ engine/
   storage.go       — Storage interface + memoryStorage (no-op for in-memory mode)
   json_storage.go  — jsonStorage: JSON file persistence with atomic writes
   errors.go        — Sentinel errors (ErrKeyNotFound, ErrKeyEmpty)
-  db_test.go       — 33 tests (DB ops, concurrency, persistence)
-  operation_test.go — 10 tests (apply, deterministic replay, error cases)
-  value_test.go    — 10 tests (Value type, accessors, copy semantics)
 ```
 
 ## Design Decisions
@@ -55,10 +55,13 @@ engine/
 6. **Storage interface** decouples DB from persistence format. `memoryStorage` for in-memory, `jsonStorage` for JSON files.
 7. **Atomic file writes** — jsonStorage writes to a temp file then renames. No partial writes corrupt the database file.
 8. **Open(path) signature** — `Open("")` for in-memory, `Open("file.db")` for persistent. Returns `(*DB, error)`.
-9. **Save on Close()** — state is written to storage on Close(). No auto-save on each mutation (WAL in Phase 4 will handle crash durability).
-10. **JSON stays contained** — `value_json.go` is the only file that imports `encoding/json`. The rest of the engine is JSON-agnostic.
-11. **No WAL, no transactions yet.** These are Phases 4-6.
+9. **Save on Close()** — state is written to storage on Close(). WAL is truncated after snapshot save.
+10. **JSON stays contained** — `value_json.go` is the only file that imports `encoding/json` (besides storage/WAL layers). The rest of the engine is JSON-agnostic.
+11. **No transactions yet.** These are Phase 6.
 12. **DB.Set/Delete route through Operations.** Every mutation creates an Operation and calls state.apply. This is the foundation for WAL (Phase 4) and transactions (Phase 6).
+13. **WAL uses JSON Lines format.** One JSON object per line, fsync after each write. Human-readable, each entry self-contained. WAL file is `<db-path>.wal`.
+14. **WAL write-before-apply.** Operations are durable on disk before being applied to in-memory state. Crash between WAL write and apply is recovered on next Open.
+15. **Delete validates before WAL write.** Existence check happens under write lock before WAL append, ensuring only valid operations reach the WAL.
 
 ## Completed Phases
 
@@ -89,9 +92,20 @@ engine/
 - 53 tests total, all passing
 - New operation tests: apply SET, apply SET overwrite, apply DELETE, apply DELETE not found, unknown OpType error, OpType.String, deterministic replay (two independent states), deleted keys absent after replay, replay matches direct mutation, DB sequence matches direct apply
 
+### Phase 4 — WAL (DONE)
+- WAL struct: file-based write-ahead log with JSON Lines format
+- append(op): marshals operation to JSON, writes line, fsyncs for durability
+- loadWALEntries(path): reads all entries from existing WAL file for replay
+- truncate(): clears WAL after successful snapshot save
+- DB.Set mutation flow: validate → create op → WAL append → apply to state
+- DB.Delete mutation flow: validate → check existence → create op → WAL append → apply
+- Open() replays WAL entries after loading snapshot (crash recovery)
+- Close() saves snapshot then truncates WAL (clean shutdown)
+- In-memory databases (Open("")) have no WAL — wal field is nil
+- WAL file location: `<db-path>.wal`
+
 ## Development Roadmap (Remaining)
 
-- **Phase 4** — WAL (write-ahead log, mutation flow: validate -> create op -> write WAL -> apply)
 - **Phase 5** — Recovery (crash recovery via WAL replay)
 - **Phase 6** — Transactions (BEGIN/COMMIT/ROLLBACK, atomicity)
 - **Phase 7** — Concurrency (race detector testing, advanced locking if needed)
