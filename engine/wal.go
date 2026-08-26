@@ -3,7 +3,6 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 )
 
@@ -257,13 +256,28 @@ func entryToOperation(e walEntry) ([]Operation, error) {
 //
 // Called after a successful snapshot save. At that point, all WAL entries
 // are already captured in the snapshot, so the log can be safely discarded.
+//
+// Implementation: closes the current file handle, truncates via the
+// filesystem path, then reopens in append mode. This avoids
+// platform-specific issues with Truncate+Seek on O_APPEND file
+// descriptors (notably on Windows).
 func (w *wal) truncate() error {
-	if err := w.file.Truncate(0); err != nil {
+	// Close the current handle so the OS releases any locks.
+	if err := w.file.Close(); err != nil {
+		return fmt.Errorf("WAL truncate close: %w", err)
+	}
+
+	// Truncate via path — works reliably across platforms.
+	if err := os.Truncate(w.path, 0); err != nil {
 		return fmt.Errorf("WAL truncate: %w", err)
 	}
-	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("WAL seek: %w", err)
+
+	// Reopen in append mode for future writes.
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("WAL truncate reopen: %w", err)
 	}
+	w.file = f
 	return nil
 }
 
