@@ -136,12 +136,18 @@ func (tx *Tx) Exists(key Key) bool {
 // duration. No other reads or writes can proceed until the transaction
 // completes. Keep transactions short.
 //
+// Returns ErrClosed if the database has been closed.
+//
 // Do NOT call DB methods (db.Set, db.Get, etc.) from within fn — use
 // the Tx methods instead. Calling DB methods from within a transaction
 // will deadlock.
 func (db *DB) Transaction(fn func(tx *Tx) error) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
+
+	if db.closed {
+		return ErrClosed
+	}
 
 	tx := &Tx{
 		db:      db,

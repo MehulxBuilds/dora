@@ -11,4 +11,7 @@ var (
 
 	// ErrKeyEmpty is returned when an operation is attempted with an empty key.
 	ErrKeyEmpty = errors.New("key must not be empty")
+
+	// ErrClosed is returned when an operation is attempted on a closed database.
+	ErrClosed = errors.New("database is closed")
 )

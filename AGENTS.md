@@ -54,7 +54,7 @@ engine/
 2. **Key is `type Key = string`** (alias, not defined type). Keeps it simple. Can evolve later.
 3. **state is unexported.** Only DB is the public API surface. State is an internal implementation detail.
 4. **Constructors copy slices/maps** (NewArray, NewObject). Accessors also return copies. Values are immutable once created.
-5. **sync.RWMutex on DB**, not on state. State is a pure data structure; DB handles all synchronization. RLock for reads, Lock for writes.
+5. **sync.RWMutex on DB**, not on state. State is a pure data structure; DB handles all synchronization. RLock for reads, Lock for writes. All methods use defer for unlock to prevent leaks on error paths.
 6. **Storage interface** decouples DB from persistence format. `memoryStorage` for in-memory, `jsonStorage` for JSON files.
 7. **Atomic file writes** — jsonStorage writes to a temp file then renames. No partial writes corrupt the database file.
 8. **Open(path) signature** — `Open("")` for in-memory, `Open("file.db")` for persistent. Returns `(*DB, error)`.
@@ -127,10 +127,28 @@ engine/
 - Read-only transactions produce no WAL entry
 - Empty key validation on all Tx methods
 
+### Phase 7 — Concurrency (DONE)
+- Full concurrency audit of all code paths for data races
+- **Bug fixed:** Close() previously released the write lock before operating on WAL/storage — concurrent Set/Delete could write to a closing WAL. Now Close() holds the exclusive lock for its entire duration (snapshot + save + truncate + close)
+- Added `closed bool` field to DB struct, checked under lock in all public methods
+- Added `ErrClosed` sentinel error — returned by Set, Get, Delete, Transaction, Close (double-close)
+- Non-error-returning methods (Exists, Len, Keys) return zero values (false, 0, nil) after close
+- All unlock calls now use defer — prevents lock leaks on early returns and error paths
+- Concurrency model remains simple: single sync.RWMutex, no per-key locks, no MVCC
+- Value type is race-free by design: passed by value, constructors copy slices/maps, accessors return copies
+
+### Phase 8 — Snapshots (DONE)
+- Added public `db.Snapshot()` method — saves current state to storage and truncates WAL without closing the database
+- Extracted internal `db.checkpoint()` method — shared implementation between Snapshot() and Close()
+- Refactored `Close()` to call `checkpoint()` then close file handles — eliminates code duplication
+- Snapshot() acquires exclusive write lock, returns ErrClosed if database is closed
+- For in-memory databases, Snapshot() runs through harmlessly (memoryStorage.Save is a no-op)
+- Recovery model: Load snapshot → replay WAL entries added since last Snapshot/Close
+- Snapshot is a checkpoint, not canonical history — WAL is the source of truth until next checkpoint
+- No automatic/periodic snapshotting — callers control when to checkpoint (e.g. via goroutine + ticker)
+
 ## Development Roadmap (Remaining)
 
-- **Phase 7** — Concurrency (race detector testing, advanced locking if needed)
-- **Phase 8** — Snapshots (periodic checkpoints, snapshot + WAL replay for recovery)
 - **Phase 9** — Deterministic Verification (operation IDs, sequence numbers, state hashing)
 - **Phase 10** — Prefixes/Namespaces (db.Keys("user:"), db.Prefix("user:"))
 
