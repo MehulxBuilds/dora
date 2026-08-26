@@ -12,6 +12,8 @@
 ```
 Public Go API  (db.go)
       |
+  Operation Model  (operation.go)
+      |
   Storage interface  (storage.go)
       |
   JSON Storage  (json_storage.go)
@@ -30,6 +32,7 @@ JSON is a serialization format, NOT the core architecture. The Value type is a d
 ```
 engine/
   db.go            — DB struct, public API (Open, Close, Set, Get, Delete, Exists, Len, Keys), sync.RWMutex
+  operation.go     — OpType (SET, DELETE), Operation struct, state.apply (deterministic state transition)
   state.go         — state struct (internal), in-memory keyspace, snapshot/load
   key.go           — Key type alias (currently string)
   value.go         — Value type with typed constructors/accessors
@@ -38,6 +41,7 @@ engine/
   json_storage.go  — jsonStorage: JSON file persistence with atomic writes
   errors.go        — Sentinel errors (ErrKeyNotFound, ErrKeyEmpty)
   db_test.go       — 33 tests (DB ops, concurrency, persistence)
+  operation_test.go — 10 tests (apply, deterministic replay, error cases)
   value_test.go    — 10 tests (Value type, accessors, copy semantics)
 ```
 
@@ -53,7 +57,8 @@ engine/
 8. **Open(path) signature** — `Open("")` for in-memory, `Open("file.db")` for persistent. Returns `(*DB, error)`.
 9. **Save on Close()** — state is written to storage on Close(). No auto-save on each mutation (WAL in Phase 4 will handle crash durability).
 10. **JSON stays contained** — `value_json.go` is the only file that imports `encoding/json`. The rest of the engine is JSON-agnostic.
-11. **No WAL, no transactions, no operations model yet.** These are Phases 3-6.
+11. **No WAL, no transactions yet.** These are Phases 4-6.
+12. **DB.Set/Delete route through Operations.** Every mutation creates an Operation and calls state.apply. This is the foundation for WAL (Phase 4) and transactions (Phase 6).
 
 ## Completed Phases
 
@@ -76,9 +81,16 @@ engine/
 - 43 tests total, all passing
 - New persistence tests: round-trip, all value types, reopen, deletes survive, overwrites survive, corrupt file rejection, empty file, readable JSON verification, multiple close/reopen cycles, deeply nested values
 
+### Phase 3 — Operation Model (DONE)
+- OpType enum (OpSet, OpDelete) with String() method
+- Operation struct: Type, Key, Value
+- state.apply(op) — single deterministic state-transition function
+- DB.Set and DB.Delete now create Operations and apply them (no longer call state.set/state.delete directly)
+- 53 tests total, all passing
+- New operation tests: apply SET, apply SET overwrite, apply DELETE, apply DELETE not found, unknown OpType error, OpType.String, deterministic replay (two independent states), deleted keys absent after replay, replay matches direct mutation, DB sequence matches direct apply
+
 ## Development Roadmap (Remaining)
 
-- **Phase 3** — Operation Model (explicit Operation struct, deterministic apply)
 - **Phase 4** — WAL (write-ahead log, mutation flow: validate -> create op -> write WAL -> apply)
 - **Phase 5** — Recovery (crash recovery via WAL replay)
 - **Phase 6** — Transactions (BEGIN/COMMIT/ROLLBACK, atomicity)
