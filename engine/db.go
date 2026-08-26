@@ -97,11 +97,10 @@ func Open(path string) (*DB, error) {
 // Close saves the current state to storage and releases resources.
 //
 // For persistent databases, Close performs (all under exclusive lock):
-//  1. Snapshot the in-memory state.
-//  2. Save the snapshot to storage.
-//  3. Truncate the WAL (all entries are now in the snapshot).
-//  4. Close the WAL and storage file handles.
-//  5. Mark the database as closed.
+//  1. Checkpoint: save snapshot to storage, truncate WAL.
+//  2. Close the WAL file handle.
+//  3. Close the storage file handle.
+//  4. Mark the database as closed.
 //
 // After Close returns, all subsequent method calls return ErrClosed
 // (or zero values for non-error-returning methods like Exists, Len, Keys).
@@ -119,19 +118,11 @@ func (db *DB) Close() error {
 		return ErrClosed
 	}
 
-	snap := db.state.snapshot()
-
-	// Save snapshot first. If this succeeds, the snapshot is the new
-	// authoritative state and the WAL can be safely discarded.
-	if err := db.storage.Save(snap); err != nil {
+	if err := db.checkpoint(); err != nil {
 		return err
 	}
 
-	// Truncate and close the WAL after successful snapshot save.
 	if db.wal != nil {
-		if err := db.wal.truncate(); err != nil {
-			return err
-		}
 		if err := db.wal.close(); err != nil {
 			return err
 		}
@@ -142,6 +133,61 @@ func (db *DB) Close() error {
 	}
 
 	db.closed = true
+	return nil
+}
+
+// Snapshot saves the current in-memory state to storage and truncates
+// the WAL, without closing the database.
+//
+// This is the primary mechanism for controlling WAL size and recovery
+// time in long-running databases. After a successful Snapshot, the WAL
+// is empty and recovery only needs the snapshot file.
+//
+// Snapshot acquires the exclusive write lock for its duration. No reads
+// or writes can proceed while the snapshot is being written. Keep this
+// in mind for latency-sensitive workloads.
+//
+// For in-memory databases (no storage file), Snapshot is a no-op.
+//
+// Returns ErrClosed if the database has been closed.
+func (db *DB) Snapshot() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+
+	return db.checkpoint()
+}
+
+// checkpoint saves the current state to storage and truncates the WAL.
+//
+// This is the internal implementation shared by Close() and Snapshot().
+// It must be called with db.mu held (exclusive write lock).
+//
+// The sequence is:
+//  1. Copy the in-memory state (snapshot).
+//  2. Write the snapshot to storage (atomic file write).
+//  3. Truncate the WAL (all entries are now captured in the snapshot).
+//
+// If step 2 fails, the WAL is NOT truncated — the entries remain for
+// the next recovery attempt. If step 3 fails, the snapshot is already
+// saved — the next Open will replay WAL entries that are already in the
+// snapshot (idempotent, harmless).
+func (db *DB) checkpoint() error {
+	snap := db.state.snapshot()
+
+	if err := db.storage.Save(snap); err != nil {
+		return err
+	}
+
+	if db.wal != nil {
+		if err := db.wal.truncate(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

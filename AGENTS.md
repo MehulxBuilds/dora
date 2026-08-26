@@ -137,9 +137,18 @@ engine/
 - Concurrency model remains simple: single sync.RWMutex, no per-key locks, no MVCC
 - Value type is race-free by design: passed by value, constructors copy slices/maps, accessors return copies
 
+### Phase 8 — Snapshots (DONE)
+- Added public `db.Snapshot()` method — saves current state to storage and truncates WAL without closing the database
+- Extracted internal `db.checkpoint()` method — shared implementation between Snapshot() and Close()
+- Refactored `Close()` to call `checkpoint()` then close file handles — eliminates code duplication
+- Snapshot() acquires exclusive write lock, returns ErrClosed if database is closed
+- For in-memory databases, Snapshot() runs through harmlessly (memoryStorage.Save is a no-op)
+- Recovery model: Load snapshot → replay WAL entries added since last Snapshot/Close
+- Snapshot is a checkpoint, not canonical history — WAL is the source of truth until next checkpoint
+- No automatic/periodic snapshotting — callers control when to checkpoint (e.g. via goroutine + ticker)
+
 ## Development Roadmap (Remaining)
 
-- **Phase 8** — Snapshots (periodic checkpoints, snapshot + WAL replay for recovery)
 - **Phase 9** — Deterministic Verification (operation IDs, sequence numbers, state hashing)
 - **Phase 10** — Prefixes/Namespaces (db.Keys("user:"), db.Prefix("user:"))
 
