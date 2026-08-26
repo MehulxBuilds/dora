@@ -147,9 +147,20 @@ engine/
 - Snapshot is a checkpoint, not canonical history — WAL is the source of truth until next checkpoint
 - No automatic/periodic snapshotting — callers control when to checkpoint (e.g. via goroutine + ticker)
 
+### Phase 9 — Deterministic Verification (DONE)
+- Added `seq uint64` to state — monotonically increasing counter, incremented on every successful `state.apply()`
+- `db.Seq() uint64` — returns current sequence number (operation ID / position in history)
+- `db.StateHash() ([32]byte, error)` — computes SHA-256 of entire state (data only, NOT seq)
+- State hash algorithm: sort keys lexicographically, feed length-prefixed key bytes + JSON value bytes into SHA-256
+- Hash is deterministic: same key-value data → same hash, regardless of operation history
+- Seq persisted in snapshots via reserved key `\x00_seq` (NUL-prefix prevents user collision)
+- On Open: seq extracted from loaded data and removed before creating state (invisible to user)
+- On checkpoint: seq injected into snapshot map before saving
+- Seq increments during WAL replay (each replayed apply increments seq naturally)
+- No changes to Storage interface, WAL format, or json_storage — seq piggybacks on existing data map
+
 ## Development Roadmap (Remaining)
 
-- **Phase 9** — Deterministic Verification (operation IDs, sequence numbers, state hashing)
 - **Phase 10** — Prefixes/Namespaces (db.Keys("user:"), db.Prefix("user:"))
 
 ## Rules

@@ -45,18 +45,23 @@ type Operation struct {
 // Given the same state and the same operation, apply always produces the
 // same result. This is the core determinism guarantee of the engine.
 //
+// On success, the state's sequence number is incremented. Each successful
+// apply gets a unique, monotonically increasing sequence number.
+//
 // Returns ErrKeyNotFound if a DELETE targets a non-existent key.
 // Returns an error for unknown operation types.
 func (s *state) apply(op Operation) error {
 	switch op.Type {
 	case OpSet:
 		s.data[op.Key] = op.Value
+		s.seq++
 		return nil
 	case OpDelete:
 		if _, ok := s.data[op.Key]; !ok {
 			return ErrKeyNotFound
 		}
 		delete(s.data, op.Key)
+		s.seq++
 		return nil
 	default:
 		return fmt.Errorf("unknown operation type: %s", op.Type)

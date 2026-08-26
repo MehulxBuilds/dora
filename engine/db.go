@@ -2,6 +2,12 @@ package engine
 
 import "sync"
 
+// metaSeqKey is a reserved key used to persist the sequence number in
+// snapshot files. It uses a NUL-byte prefix to prevent collision with
+// user keys (impractical to type, and any legitimate key starting with
+// \x00 would be highly unusual).
+const metaSeqKey = "\x00_seq"
+
 // DB is the top-level database instance.
 //
 // DB is safe for concurrent use. Reads (Get, Exists, Len, Keys) acquire a
@@ -59,7 +65,19 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 
+	// Extract the persisted sequence number from the snapshot data.
+	// It is stored under a reserved key that is removed before creating
+	// the state, so it never appears in the user-visible keyspace.
+	var seq uint64
+	if v, ok := data[metaSeqKey]; ok {
+		if n, nok := v.Number(); nok {
+			seq = uint64(n)
+		}
+		delete(data, metaSeqKey)
+	}
+
 	s := newStateFrom(data)
+	s.seq = seq
 
 	// For persistent databases, set up the WAL.
 	var w *wal
@@ -168,15 +186,18 @@ func (db *DB) Snapshot() error {
 //
 // The sequence is:
 //  1. Copy the in-memory state (snapshot).
-//  2. Write the snapshot to storage (atomic file write).
-//  3. Truncate the WAL (all entries are now captured in the snapshot).
+//  2. Inject the current sequence number into the snapshot under a
+//     reserved key, so it is persisted alongside the data.
+//  3. Write the snapshot to storage (atomic file write).
+//  4. Truncate the WAL (all entries are now captured in the snapshot).
 //
-// If step 2 fails, the WAL is NOT truncated — the entries remain for
-// the next recovery attempt. If step 3 fails, the snapshot is already
+// If step 3 fails, the WAL is NOT truncated — the entries remain for
+// the next recovery attempt. If step 4 fails, the snapshot is already
 // saved — the next Open will replay WAL entries that are already in the
 // snapshot (idempotent, harmless).
 func (db *DB) checkpoint() error {
 	snap := db.state.snapshot()
+	snap[metaSeqKey] = NewNumber(float64(db.state.seq))
 
 	if err := db.storage.Save(snap); err != nil {
 		return err
@@ -311,4 +332,45 @@ func (db *DB) Keys() []Key {
 		return nil
 	}
 	return db.state.keys()
+}
+
+// Seq returns the current operation sequence number.
+//
+// The sequence number is a monotonically increasing counter that is
+// incremented on every successful state mutation (Set, Delete, or each
+// operation within a committed transaction). It serves as both an
+// operation ID and a position in the operation history.
+//
+// Returns 0 if the database has been closed.
+func (db *DB) Seq() uint64 {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed {
+		return 0
+	}
+	return db.state.seq
+}
+
+// StateHash computes a deterministic SHA-256 hash of the current state.
+//
+// The hash covers only the key-value data — it does NOT include the
+// sequence number. Two databases with identical key-value pairs produce
+// the same hash, regardless of operation history.
+//
+// This is the primary mechanism for deterministic verification:
+//
+//	same initial state + same operation sequence = same state hash
+//
+// The hash is computed by sorting all keys lexicographically, then
+// feeding length-prefixed key bytes and JSON-encoded value bytes into
+// SHA-256. The encoding is unambiguous and deterministic.
+//
+// Returns ErrClosed if the database has been closed.
+func (db *DB) StateHash() ([32]byte, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed {
+		return [32]byte{}, ErrClosed
+	}
+	return db.state.hash()
 }
