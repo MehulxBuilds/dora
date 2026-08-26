@@ -1,8 +1,8 @@
-# Go Native DB — Agent Memory
+# Dora DB
 
 ## Project Identity
 
-- **Module:** `github.com/MehulxBuilds/native-db`
+- **Module:** `github.com/MehulxBuilds/dora`
 - **Go version:** 1.24.5
 - **License:** MIT
 - **Vision:** SQLite, but for JSON/key-value data. Lightweight, embedded, local-first, durable.
