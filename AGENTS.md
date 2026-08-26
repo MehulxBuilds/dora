@@ -58,7 +58,7 @@ engine/
 5. **sync.RWMutex on DB**, not on state. State is a pure data structure; DB handles all synchronization. RLock for reads, Lock for writes. All methods use defer for unlock to prevent leaks on error paths.
 6. **Storage interface** decouples DB from persistence format. `memoryStorage` for in-memory, `jsonStorage` for JSON files.
 7. **Atomic file writes** — jsonStorage writes to a temp file then renames. No partial writes corrupt the database file.
-8. **Open(path) signature** — `Open("")` for in-memory, `Open("file.db")` for persistent. Returns `(*DB, error)`.
+8. **Open(path) signature** — `Open("")` for in-memory, `Open("file.db")` for persistent. Returns `(*DB, error)`. Persistent files are automatically placed inside `dora/` directory (branding convention, like `prisma/` or `drizzle/`). The `dora/` directory is created automatically.
 9. **Save on Close()** — state is written to storage on Close(). WAL is truncated after snapshot save.
 10. **JSON stays contained** — `value_json.go` is the only file that imports `encoding/json` (besides storage/WAL layers). The rest of the engine is JSON-agnostic.
 11. **DB.Set/Delete route through Operations.** Every mutation creates an Operation and calls state.apply. This is the foundation for WAL and transactions.

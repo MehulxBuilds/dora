@@ -16,7 +16,7 @@ db.Set("user:1", engine.NewObject(map[string]engine.Value{
 val, _ := db.Get("user:1")
 ```
 
-Your data lives in a single file (`app.db`) right next to your application. Open it, read it, write it, close it. That's it.
+Your data lives in a `dora/` directory right next to your application -- like `prisma/` or `drizzle/`, but for your database. Open it, read it, write it, close it. That's it.
 
 ---
 
@@ -39,14 +39,14 @@ Requires Go 1.24+. Zero external dependencies -- only the Go standard library.
 ### Open a database
 
 ```go
-// Persistent -- data saved to disk
+// Persistent -- files created at dora/myapp.db and dora/myapp.db.wal
 db, err := engine.Open("myapp.db")
 
 // In-memory -- no files, data lost when process exits
 db, err := engine.Open("")
 ```
 
-`Open("")` gives you a fast in-memory database. `Open("path.db")` gives you a persistent database backed by a JSON file and a write-ahead log.
+`Open("")` gives you a fast in-memory database. `Open("myapp.db")` gives you a persistent database. All files are automatically placed inside a `dora/` directory (created if it doesn't exist).
 
 ### Store and retrieve values
 
@@ -266,12 +266,12 @@ Inside the transaction function, always use `tx.Set`, `tx.Get`, `tx.Delete`, `tx
 
 ## Persistence and Durability
 
-When you open a database with a file path, Dora creates two files:
+When you open a database with a file path, Dora creates two files inside the `dora/` directory:
 
 | File | Purpose |
 |------|---------|
-| `app.db` | Snapshot -- the full database state as human-readable JSON |
-| `app.db.wal` | Write-ahead log -- a journal of recent operations |
+| `dora/app.db` | Snapshot -- the full database state as human-readable JSON |
+| `dora/app.db.wal` | Write-ahead log -- a journal of recent operations |
 
 ### How writes work
 
@@ -284,7 +284,7 @@ The write-ahead log is the key to durability. Once step 1 completes, the operati
 
 ### How the snapshot file works
 
-The snapshot file (`app.db`) is a point-in-time copy of the entire database, written as pretty-printed JSON:
+The snapshot file (`dora/app.db`) is a point-in-time copy of the entire database, written as pretty-printed JSON:
 
 ```json
 {
@@ -304,8 +304,8 @@ If your process crashes:
 
 ```
 1. Open("app.db")
-2. Load the snapshot (app.db)
-3. Replay the WAL (app.db.wal) -- apply any operations added since the last snapshot
+2. Load the snapshot (dora/app.db)
+3. Replay the WAL (dora/app.db.wal) -- apply any operations added since the last snapshot
 4. Database is recovered to the exact state before the crash
 ```
 
@@ -534,7 +534,9 @@ Your Go Application
    |          |      |
   WAL     Storage   Tx
    |          |
- .db.wal    .db      (disk files)
+   dora/              (all files live here)
+    |- app.db.wal
+    |- app.db
 ```
 
 ### How the layers fit together
@@ -580,8 +582,8 @@ This is why the database is a **deterministic state machine**. The same sequence
 | | In-Memory | Persistent |
 |---|---|---|
 | Open | `Open("")` | `Open("app.db")` |
-| WAL | None | `app.db.wal` |
-| Snapshot | No-op | Writes `app.db` |
+| Files | None | `dora/app.db` + `dora/app.db.wal` |
+| Snapshot | No-op | Writes `dora/app.db` |
 | Speed | Fastest | Slightly slower (disk fsync) |
 | Survives restart | No | Yes |
 | Use case | Tests, caches, temp data | Real applications |
@@ -591,6 +593,17 @@ Both modes have the same API. You can develop with in-memory and switch to persi
 ---
 
 ## File Format
+
+All database files live inside the `dora/` directory:
+
+```
+your-project/
+  dora/
+    app.db          <-- snapshot (human-readable JSON)
+    app.db.wal      <-- write-ahead log (JSON Lines)
+  main.go
+  go.mod
+```
 
 The snapshot file is valid, human-readable JSON. You can open it in any text editor:
 

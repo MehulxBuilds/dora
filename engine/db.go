@@ -1,12 +1,21 @@
 package engine
 
-import "sync"
+import (
+	"os"
+	"path/filepath"
+	"sync"
+)
 
 // metaSeqKey is a reserved key used to persist the sequence number in
 // snapshot files. It uses a NUL-byte prefix to prevent collision with
 // user keys (impractical to type, and any legitimate key starting with
 // \x00 would be highly unusual).
 const metaSeqKey = "\x00_seq"
+
+// dataDir is the directory where all database files are stored.
+// This is a branding convention — like prisma/ or drizzle/, all Dora
+// database files live under dora/ relative to the working directory.
+const dataDir = "dora"
 
 // DB is the top-level database instance.
 //
@@ -46,17 +55,23 @@ type DB struct {
 // If path is empty, the database operates purely in memory with no persistence
 // and no WAL.
 //
-// If path is non-empty, it is treated as a file path for JSON persistence:
-//   - If the file exists, the state is loaded from it.
-//   - If the file does not exist, a new empty database is created.
-//   - A WAL file (<path>.wal) is opened for durability.
-//   - Any existing WAL entries are replayed to recover committed state.
-//   - On Close(), the state is saved and the WAL is truncated.
+// If path is non-empty, it is treated as a filename for JSON persistence.
+// The file is automatically placed inside the dora/ directory:
+//
+//	Open("app.db")  →  dora/app.db  +  dora/app.db.wal
+//	Open("")        →  in-memory (no files)
+//
+// The dora/ directory is created automatically if it does not exist.
 func Open(path string) (*DB, error) {
 	var store Storage
 	if path == "" {
 		store = &memoryStorage{}
 	} else {
+		// Place all database files under the dora/ directory.
+		path = filepath.Join(dataDir, path)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, err
+		}
 		store = newJSONStorage(path)
 	}
 
