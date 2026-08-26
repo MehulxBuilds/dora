@@ -16,6 +16,16 @@ func newState() *state {
 	}
 }
 
+// newStateFrom creates a state pre-populated with the given data.
+// Used when loading from storage. The map is taken directly (not copied),
+// since the caller (storage layer) is handing ownership to the state.
+func newStateFrom(data map[Key]Value) *state {
+	if data == nil {
+		data = make(map[Key]Value)
+	}
+	return &state{data: data}
+}
+
 // get retrieves the value for a key. Returns ErrKeyNotFound if the key does not exist.
 func (s *state) get(key Key) (Value, error) {
 	val, ok := s.data[key]
@@ -58,4 +68,15 @@ func (s *state) keys() []Key {
 		result = append(result, k)
 	}
 	return result
+}
+
+// snapshot returns a copy of the entire keyspace for persistence.
+// The returned map is a shallow copy — safe for the storage layer to
+// serialize without holding locks.
+func (s *state) snapshot() map[Key]Value {
+	cp := make(map[Key]Value, len(s.data))
+	for k, v := range s.data {
+		cp[k] = v
+	}
+	return cp
 }

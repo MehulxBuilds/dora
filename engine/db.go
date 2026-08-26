@@ -7,29 +7,55 @@ import "sync"
 // DB is safe for concurrent use. Reads (Get, Exists, Len, Keys) acquire a
 // shared read lock. Writes (Set, Delete) acquire an exclusive write lock.
 // The state itself is a pure data structure; all synchronization happens here.
+//
+// Persistence is managed through the Storage interface. On Open, the state
+// is loaded from storage. On Close, the state is saved back to storage.
 type DB struct {
-	mu    sync.RWMutex
-	state *state
+	mu      sync.RWMutex
+	state   *state
+	storage Storage
 }
 
 // Open creates and returns a new database instance.
 //
-// Currently this creates a purely in-memory database. In future phases,
-// this will accept a path and handle persistence, WAL recovery, etc.
-func Open() *DB {
-	return &DB{
-		state: newState(),
+// If path is empty, the database operates purely in memory with no persistence.
+// If path is non-empty, it is treated as a file path for JSON persistence:
+//   - If the file exists, the state is loaded from it.
+//   - If the file does not exist, a new empty database is created.
+//   - On Close(), the state is saved to the file.
+func Open(path string) (*DB, error) {
+	var store Storage
+	if path == "" {
+		store = &memoryStorage{}
+	} else {
+		store = newJSONStorage(path)
 	}
+
+	data, err := store.Load()
+	if err != nil {
+		return nil, err
+	}
+
+	return &DB{
+		state:   newStateFrom(data),
+		storage: store,
+	}, nil
 }
 
-// Close releases any resources held by the database.
+// Close saves the current state to storage and releases resources.
 //
-// Currently a no-op for the in-memory engine. In future phases, this will
-// flush WAL, write snapshots, and close file handles. Callers should always
-// call Close when done with the database to ensure correct behavior as the
-// engine evolves.
+// Always call Close when done with the database. For persistent databases,
+// this writes the final state to disk. Failing to call Close on a persistent
+// database means unsaved mutations are lost.
 func (db *DB) Close() error {
-	return nil
+	db.mu.Lock()
+	snap := db.state.snapshot()
+	db.mu.Unlock()
+
+	if err := db.storage.Save(snap); err != nil {
+		return err
+	}
+	return db.storage.Close()
 }
 
 // Set stores a value for the given key.
