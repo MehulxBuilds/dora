@@ -321,17 +321,53 @@ func (db *DB) Len() int {
 	return db.state.len()
 }
 
-// Keys returns a slice of all keys in the database.
+// Keys returns a slice of keys in the database.
+//
+// If called with no arguments, returns all keys.
+// If called with a prefix string, returns only keys that start with
+// that prefix:
+//
+//	db.Keys()          // all keys
+//	db.Keys("user:")   // ["user:1", "user:2", ...]
+//
 // The order of keys is not guaranteed.
-// Returns an empty slice if the database is empty.
 // Returns nil if the database has been closed.
-func (db *DB) Keys() []Key {
+func (db *DB) Keys(prefix ...string) []Key {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	if db.closed {
 		return nil
 	}
+	if len(prefix) > 0 && prefix[0] != "" {
+		return db.state.keysWithPrefix(prefix[0])
+	}
 	return db.state.keys()
+}
+
+// Prefix returns all key-value pairs where the key starts with the
+// given prefix.
+//
+//	entries := db.Prefix("user:")
+//	// entries = map[Key]Value{
+//	//     "user:1": ...,
+//	//     "user:2": ...,
+//	// }
+//
+// An empty prefix returns all key-value pairs (equivalent to a full
+// state copy).
+//
+// The returned map is a new map — it is safe to read and iterate
+// without holding any lock. Modifications to the returned map do not
+// affect the database.
+//
+// Returns nil if the database has been closed.
+func (db *DB) Prefix(prefix string) map[Key]Value {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.closed {
+		return nil
+	}
+	return db.state.prefix(prefix)
 }
 
 // Seq returns the current operation sequence number.

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // state is the in-memory keyspace. It holds the current materialized state
@@ -66,6 +67,31 @@ func (s *state) keys() []Key {
 	result := make([]Key, 0, len(s.data))
 	for k := range s.data {
 		result = append(result, k)
+	}
+	return result
+}
+
+// keysWithPrefix returns all keys that start with the given prefix.
+// The order is not guaranteed.
+func (s *state) keysWithPrefix(prefix string) []Key {
+	var result []Key
+	for k := range s.data {
+		if strings.HasPrefix(k, prefix) {
+			result = append(result, k)
+		}
+	}
+	return result
+}
+
+// prefix returns all key-value pairs where the key starts with the
+// given prefix. The returned map is a new map — safe to use without
+// holding locks.
+func (s *state) prefix(pfx string) map[Key]Value {
+	result := make(map[Key]Value)
+	for k, v := range s.data {
+		if strings.HasPrefix(k, pfx) {
+			result[k] = v
+		}
 	}
 	return result
 }

@@ -159,9 +159,17 @@ engine/
 - Seq increments during WAL replay (each replayed apply increments seq naturally)
 - No changes to Storage interface, WAL format, or json_storage — seq piggybacks on existing data map
 
+### Phase 10 — Prefixes/Namespaces (DONE)
+- `db.Keys("user:")` — returns all keys matching a prefix (variadic: `db.Keys()` with no args still returns all keys)
+- `db.Prefix("user:")` — returns `map[Key]Value` of all key-value pairs matching a prefix
+- `state.keysWithPrefix(prefix)` and `state.prefix(prefix)` — internal helpers using `strings.HasPrefix`
+- Empty prefix matches all keys/pairs (consistent with no-arg behavior)
+- Pure filtering layer — no changes to operations, WAL, storage, or transactions
+- Returns nil if database is closed (consistent with other read methods)
+
 ## Development Roadmap (Remaining)
 
-- **Phase 10** — Prefixes/Namespaces (db.Keys("user:"), db.Prefix("user:"))
+Phases 0–10 are complete. Future work:
 
 ## Rules
 
