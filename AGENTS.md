@@ -4,6 +4,7 @@
 
 - **Module:** `github.com/MehulxBuilds/native-db`
 - **Go version:** 1.24.5
+- **License:** MIT
 - **Vision:** SQLite, but for JSON/key-value data. Lightweight, embedded, local-first, durable.
 - **Core principle:** Deterministic State Machine. Same initial state + same ordered operations = same final state.
 
@@ -35,17 +36,17 @@ JSON is a serialization format, NOT the core architecture. The Value type is a d
 
 ```
 engine/
-  db.go            — DB struct, public API (Open, Close, Set, Get, Delete, Exists, Len, Keys), sync.RWMutex
+  db.go            — DB struct, public API (Open, Close, Set, Get, Delete, Exists, Len, Keys, Prefix, Snapshot, Seq, StateHash), sync.RWMutex
   tx.go            — Tx struct, tx.Set/Get/Delete/Exists, DB.Transaction (atomic commit/rollback)
   operation.go     — OpType (SET, DELETE), Operation struct, state.apply (deterministic state transition)
   wal.go           — WAL struct, append (write+fsync), appendBatch (TX entry), loadWALEntries (replay), truncate, JSON Lines format
-  state.go         — state struct (internal), in-memory keyspace, snapshot/load
+  state.go         — state struct (internal), in-memory keyspace (map[Key]Value + seq uint64), snapshot, hash, prefix queries
   key.go           — Key type alias (currently string)
   value.go         — Value type with typed constructors/accessors
   value_json.go    — JSON marshaling/unmarshaling for Value (MarshalJSON, UnmarshalJSON)
   storage.go       — Storage interface + memoryStorage (no-op for in-memory mode)
-  json_storage.go  — jsonStorage: JSON file persistence with atomic writes
-  errors.go        — Sentinel errors (ErrKeyNotFound, ErrKeyEmpty)
+  json_storage.go  — jsonStorage: JSON file persistence with atomic writes (temp+rename)
+  errors.go        — Sentinel errors (ErrKeyNotFound, ErrKeyEmpty, ErrClosed)
 ```
 
 ## Design Decisions
@@ -60,42 +61,378 @@ engine/
 8. **Open(path) signature** — `Open("")` for in-memory, `Open("file.db")` for persistent. Returns `(*DB, error)`.
 9. **Save on Close()** — state is written to storage on Close(). WAL is truncated after snapshot save.
 10. **JSON stays contained** — `value_json.go` is the only file that imports `encoding/json` (besides storage/WAL layers). The rest of the engine is JSON-agnostic.
-11. **No transactions yet.** These are Phase 6.
-12. **DB.Set/Delete route through Operations.** Every mutation creates an Operation and calls state.apply. This is the foundation for WAL (Phase 4) and transactions (Phase 6).
-13. **WAL uses JSON Lines format.** One JSON object per line, fsync after each write. Human-readable, each entry self-contained. WAL file is `<db-path>.wal`.
-14. **WAL write-before-apply.** Operations are durable on disk before being applied to in-memory state. Crash between WAL write and apply is recovered on next Open.
-15. **Delete validates before WAL write.** Existence check happens under write lock before WAL append, ensuring only valid operations reach the WAL.
+11. **DB.Set/Delete route through Operations.** Every mutation creates an Operation and calls state.apply. This is the foundation for WAL and transactions.
+12. **WAL uses JSON Lines format.** One JSON object per line, fsync after each write. Human-readable, each entry self-contained. WAL file is `<db-path>.wal`.
+13. **WAL write-before-apply.** Operations are durable on disk before being applied to in-memory state. Crash between WAL write and apply is recovered on next Open.
+14. **Delete validates before WAL write.** Existence check happens under write lock before WAL append, ensuring only valid operations reach the WAL.
+15. **Transaction atomicity via single WAL entry.** All operations in a transaction are written as one `{"type":"TX","ops":[...]}` JSON line. One write+fsync = all-or-nothing.
+16. **Serialized transactions.** Exclusive write lock held for the entire transaction duration. No MVCC, no optimistic concurrency — simple and correct.
+17. **Closed guard on all public methods.** `closed bool` field checked under lock. Error-returning methods return `ErrClosed`. Non-error methods (Exists, Len, Keys) return zero values.
+18. **Seq persisted via reserved key.** `\x00_seq` is injected into snapshot map on save, extracted and removed on load. No Storage interface changes needed. NUL-prefix prevents user collision.
+19. **StateHash is data-only.** SHA-256 covers key-value content, NOT the sequence number. Two databases with identical data hash identically regardless of history.
+20. **Prefix queries are pure filtering.** O(n) scan with `strings.HasPrefix`. No index, no tree — correctness before performance.
+
+## Internal Component Reference
+
+### DB (db.go)
+
+The public API surface. Holds `sync.RWMutex`, coordinates state/WAL/storage.
+
+**Fields:**
+
+- `mu sync.RWMutex` — all synchronization
+- `state *state` — the in-memory keyspace
+- `storage Storage` — persistence backend
+- `wal *wal` — write-ahead log (nil for in-memory)
+- `closed bool` — prevents use after Close()
+
+**Constants:**
+
+- `metaSeqKey = "\x00_seq"` — reserved key for persisting seq in snapshots
+
+**Public methods:**
+
+- `Open(path) (*DB, error)` — constructor. `""` = in-memory, else persistent with WAL
+- `Close() error` — checkpoint + close handles + set closed=true
+- `Snapshot() error` — checkpoint without closing (controls WAL growth)
+- `Set(key, val) error` — WAL append → state.apply
+- `Get(key) (Value, error)` — state.get under RLock
+- `Delete(key) error` — existence check → WAL append → state.apply
+- `Exists(key) bool` — state.exists under RLock
+- `Len() int` — state.len under RLock
+- `Keys(prefix ...string) []Key` — all keys or prefix-filtered
+- `Prefix(prefix) map[Key]Value` — key-value pairs by prefix
+- `Seq() uint64` — current sequence number
+- `StateHash() ([32]byte, error)` — SHA-256 of state data
+
+**Internal methods:**
+
+- `checkpoint() error` — snapshot state → inject seq → save to storage → truncate WAL. Called by Close() and Snapshot(). Must be called under write lock.
+
+### State (state.go)
+
+Pure in-memory data structure. No locks, no I/O.
+
+**Fields:**
+
+- `data map[Key]Value` — the keyspace
+- `seq uint64` — operation counter, incremented on each successful apply
+
+**Methods:**
+
+- `get(key) (Value, error)` — map lookup
+- `set(key, val)` — direct map write (used by legacy code paths only)
+- `delete(key) error` — map delete with existence check
+- `exists(key) bool` — map membership
+- `len() int` — map size
+- `keys() []Key` — all keys (unordered)
+- `keysWithPrefix(prefix) []Key` — filtered by `strings.HasPrefix`
+- `prefix(pfx) map[Key]Value` — filtered key-value pairs
+- `snapshot() map[Key]Value` — shallow copy for persistence
+- `hash() ([32]byte, error)` — SHA-256 (sorted keys, length-prefixed key+value bytes)
+- `apply(op) error` — deterministic state transition (defined in operation.go)
+
+### Operation Model (operation.go)
+
+**Types:**
+
+- `OpType int` — enum: `OpSet`, `OpDelete`
+- `Operation struct` — `Type OpType`, `Key Key`, `Value Value`
+
+**`state.apply(op) error`** — the single deterministic state transition function:
+
+- `OpSet`: `s.data[op.Key] = op.Value; s.seq++`
+- `OpDelete`: check existence → `delete(s.data, op.Key); s.seq++`
+- Unknown type: return error
+
+Failed operations (e.g. DELETE non-existent key) do NOT increment seq.
+
+### WAL (wal.go)
+
+File-based write-ahead log. JSON Lines format.
+
+**On-disk format (`walEntry`):**
+
+```json
+{"type":"SET","key":"user:1","value":{"name":"Mehul"}}
+{"type":"DELETE","key":"temp:session"}
+{"type":"TX","ops":[{"type":"SET","key":"a","value":1},{"type":"SET","key":"b","value":2}]}
+```
+
+**Fields on walEntry struct:**
+
+- `Type string` — `"SET"`, `"DELETE"`, or `"TX"`
+- `Key Key` — present for SET/DELETE, omitempty for TX
+- `Value *Value` — present for SET only, omitempty
+- `Ops []walEntry` — present for TX only, omitempty
+
+**Methods:**
+
+- `openWAL(path) (*wal, error)` — open/create in append mode
+- `append(op) error` — marshal → write → fsync (single operation)
+- `appendBatch(ops) error` — marshal TX entry → write → fsync (transaction)
+- `truncate() error` — clear file to 0 bytes (after snapshot save)
+- `close() error` — close file handle
+
+**`loadWALEntries(path) ([]Operation, error)`** — recovery function:
+
+1. Read entire file with `os.ReadFile`
+2. Parse entries line by line with manual byte-offset tracking
+3. On corrupt/incomplete entry: stop parsing, truncate file to last valid offset
+4. For TX entries: recursively unpack into flat `[]Operation` list
+5. Return all valid operations for replay
+
+**`entryToOperation(walEntry) ([]Operation, error)`** — converts on-disk entry to Operation(s):
+
+- SET → single-element slice
+- DELETE → single-element slice
+- TX → recursively unpack all sub-entries
+
+### Transaction (tx.go)
+
+**Tx struct fields:**
+
+- `db *DB` — reference to parent database (for reading base state)
+- `overlay map[Key]txOverlay` — transaction-local changes
+- `ops []Operation` — ordered operation list for WAL
+
+**txOverlay struct:**
+
+- `value Value` — the value (if not deleted)
+- `deleted bool` — true if key was deleted in this transaction
+
+**tx.Get lookup order:**
+
+1. Check overlay → if deleted, return ErrKeyNotFound; if set, return value
+2. Fall through to `db.state.get(key)` (base state, no lock needed — write lock held by Transaction)
+
+**tx.Delete validation:**
+
+1. Check overlay → if already deleted, return ErrKeyNotFound
+2. If not in overlay, check `db.state.exists(key)`
+3. Mark deleted in overlay, append OpDelete to ops
+
+**DB.Transaction(fn) flow:**
+
+1. Acquire exclusive write lock
+2. Create Tx with empty overlay
+3. Call fn(tx) — user code runs tx.Set/Get/Delete/Exists
+4. If fn returns error → ROLLBACK (discard Tx, return error)
+5. If fn returns nil → COMMIT:
+   - If no ops (read-only): return nil, no WAL entry
+   - Write all ops as single TX WAL entry via appendBatch
+   - Apply all ops to state via state.apply (errors ignored — already validated)
+6. Release lock
+
+### Storage (storage.go, json_storage.go)
+
+**Storage interface:**
+
+```go
+Load() (map[Key]Value, error)
+Save(data map[Key]Value) error
+Close() error
+```
+
+**memoryStorage:** no-op for all methods. Load returns empty map.
+
+**jsonStorage:**
+
+- `Load()`: ReadFile → handle not-exist (empty map) / empty file (empty map) → json.Unmarshal
+- `Save(data)`: json.MarshalIndent → write temp file → os.Rename (atomic)
+- `Close()`: no-op (no persistent file handles)
+
+### Value (value.go, value_json.go)
+
+**ValueType enum:** TypeNull, TypeBoolean, TypeNumber, TypeString, TypeArray, TypeObject
+
+**Value struct:** `typ ValueType`, `data interface{}`
+
+**Constructors:** NewNull, NewBoolean(bool), NewNumber(float64), NewString(string), NewArray([]Value), NewObject(map[string]Value). Array and Object constructors copy their input.
+
+**Accessors:** return `(typed_value, ok bool)`. Array and Object accessors return copies.
+
+**JSON (value_json.go):**
+
+- `MarshalJSON()` — switches on typ, marshals underlying Go value
+- `UnmarshalJSON(data)` — unmarshals to `interface{}`, then `valueFromInterface` recursively converts
+- `valueFromInterface(raw)` — nil→Null, bool→Boolean, float64→Number, string→String, []interface{}→Array, map[string]interface{}→Object
+
+### Errors (errors.go)
+
+Three sentinel errors:
+
+- `ErrKeyNotFound` — Get/Delete on non-existent key
+- `ErrKeyEmpty` — any operation with `""` key
+- `ErrClosed` — any operation after Close()
+
+## Mutation Flow
+
+Every write goes through this exact pipeline:
+
+```
+db.Set("key", val)
+        |
+  Validate key != ""              →  ErrKeyEmpty
+        |
+  Acquire write lock (defer unlock)
+        |
+  Check closed                    →  ErrClosed
+        |
+  Create Operation{OpSet, key, val}
+        |
+  WAL append (if persistent)      →  marshal JSON → write → fsync
+        |                              (durable after this point)
+  state.apply(op)                 →  s.data[key] = val; s.seq++
+        |
+  Release lock (via defer)
+```
+
+```
+db.Delete("key")
+        |
+  Validate key != ""              →  ErrKeyEmpty
+        |
+  Acquire write lock (defer unlock)
+        |
+  Check closed                    →  ErrClosed
+        |
+  Check state.exists(key)         →  ErrKeyNotFound
+        |
+  Create Operation{OpDelete, key}
+        |
+  WAL append (if persistent)      →  marshal JSON → write → fsync
+        |
+  state.apply(op)                 →  delete(s.data, key); s.seq++
+        |
+  Release lock (via defer)
+```
+
+## Recovery Flow
+
+```
+Open("app.db")
+      |
+  Create jsonStorage("app.db")
+      |
+  storage.Load()                  →  read JSON file → map[Key]Value
+      |
+  Extract seq from data["\x00_seq"], delete reserved key
+      |
+  newStateFrom(data), set state.seq = seq
+      |
+  loadWALEntries("app.db.wal")
+      |   - parse line by line
+      |   - stop at first corrupt entry
+      |   - truncate file to remove partial entry
+      |   - unpack TX entries into flat list
+      |
+  Replay: for each op, state.apply(op) (errors ignored)
+      |   - seq increments with each successful apply
+      |
+  openWAL("app.db.wal") for appending
+      |
+  Return &DB{state, storage, wal}
+```
+
+## Snapshot File Format
+
+Human-readable JSON. The `\x00_seq` key is internal metadata:
+
+```json
+{
+  "\u0000_seq": 42,
+  "counter": 10,
+  "user:1": {
+    "age": 20,
+    "name": "Mehul"
+  }
+}
+```
+
+On load, `\x00_seq` is extracted and removed from the map before creating the state. The user never sees it through Keys(), Len(), Get(), etc.
+
+## WAL File Format
+
+JSON Lines. One JSON object per line. Three entry types:
+
+```
+{"type":"SET","key":"user:1","value":{"name":"Mehul","age":20}}
+{"type":"DELETE","key":"temp:session"}
+{"type":"TX","ops":[{"type":"SET","key":"a","value":1},{"type":"DELETE","key":"b"}]}
+```
+
+Each entry is followed by `\n`. Each write is followed by `fsync`. Crash mid-write leaves at most one incomplete line, which recovery detects and truncates.
+
+## State Hash Algorithm
+
+`db.StateHash()` returns SHA-256 of the state data (not seq). Algorithm:
+
+1. Collect all keys, sort lexicographically
+2. Write key count as 4-byte big-endian uint32
+3. For each key in sorted order:
+   - Write key byte length as 4-byte big-endian uint32
+   - Write key bytes
+   - Marshal value to JSON via Value.MarshalJSON()
+   - Write value byte length as 4-byte big-endian uint32
+   - Write value JSON bytes
+4. Return SHA-256 of the entire concatenation
+
+Determinism guaranteed by: sorted keys, Go's json.Marshal sorting map keys, length-prefix encoding preventing ambiguity.
+
+## Concurrency Model
+
+```
+Reads  (Get, Exists, Len, Keys, Prefix, Seq, StateHash)  →  RLock  (concurrent)
+Writes (Set, Delete)                                       →  Lock   (exclusive)
+Transactions                                               →  Lock   (exclusive, held for full fn duration)
+Close / Snapshot                                           →  Lock   (exclusive, held for full operation)
+```
+
+Single `sync.RWMutex` on DB. State has no locks. WAL has no locks (always accessed under DB write lock). Value is race-free (passed by value, constructors/accessors copy).
+
+## Known Limitations and Edge Cases
+
+1. **No MVCC.** Transactions hold exclusive lock — all reads and writes block until the transaction completes. Keep transactions short.
+2. **No query language.** API is Go functions only. A query language is deliberately postponed.
+3. **O(n) prefix queries.** `Keys("prefix")` and `Prefix("prefix")` scan all keys. No index or sorted structure yet.
+4. **float64 numbers.** All numbers are float64. No big integers, no decimals. Integers up to 2^53 are exact.
+5. **Seq may over-count after crash-between-snapshot-and-truncate.** If a crash happens after snapshot save but before WAL truncate, WAL replay re-applies already-snapshotted operations, incrementing seq redundantly. StateHash is still correct. Fix: add seq to WAL entries (future work).
+6. **No partial updates.** To change one field in an Object, you must read, modify, and write the entire value. Document-level PATCH is future work.
+7. **Snapshot blocks all access.** `Snapshot()` and `Close()` hold the write lock for the entire disk write. For large databases, this can cause noticeable latency.
+8. **Single file, single process.** No file locking. Running two processes on the same database file will corrupt it.
+9. **WAL fsync per entry.** Every Set/Delete fsyncs. This is correct but slow under heavy write load. Batching/group commit is future work.
+10. **Reserved key `\x00_seq`.** A user who explicitly sets a key starting with `\x00` could collide with internal metadata. Extremely unlikely in practice.
 
 ## Completed Phases
 
 ### Phase 0 — Project Foundation (DONE)
+
 - DB, State, Key, Value, Error system, package structure
-- 20 tests, all passing
 - Purely in-memory, no persistence
 
 ### Phase 1 — In-Memory Key-Value Engine (DONE)
+
 - Added sync.RWMutex to DB for concurrency safety
 - Added Keys() method, Close() lifecycle hook
-- 33 tests total (added concurrency, operation sequences, edge cases, stress)
 
 ### Phase 2 — JSON Persistence (DONE)
+
 - Storage interface: abstracts persistence behind Load/Save/Close
 - jsonStorage: reads/writes human-readable JSON files with atomic writes (temp+rename)
 - memoryStorage: no-op implementation for in-memory databases
 - Value JSON serialization: MarshalJSON/UnmarshalJSON contained in value_json.go
 - Open(path) loads state from file; Close() saves state to file
-- 43 tests total, all passing
-- New persistence tests: round-trip, all value types, reopen, deletes survive, overwrites survive, corrupt file rejection, empty file, readable JSON verification, multiple close/reopen cycles, deeply nested values
 
 ### Phase 3 — Operation Model (DONE)
+
 - OpType enum (OpSet, OpDelete) with String() method
 - Operation struct: Type, Key, Value
 - state.apply(op) — single deterministic state-transition function
-- DB.Set and DB.Delete now create Operations and apply them (no longer call state.set/state.delete directly)
-- 53 tests total, all passing
-- New operation tests: apply SET, apply SET overwrite, apply DELETE, apply DELETE not found, unknown OpType error, OpType.String, deterministic replay (two independent states), deleted keys absent after replay, replay matches direct mutation, DB sequence matches direct apply
+- DB.Set and DB.Delete now create Operations and apply them
 
 ### Phase 4 — WAL (DONE)
+
 - WAL struct: file-based write-ahead log with JSON Lines format
 - append(op): marshals operation to JSON, writes line, fsyncs for durability
 - loadWALEntries(path): reads all entries from existing WAL file for replay
@@ -108,6 +445,7 @@ engine/
 - WAL file location: `<db-path>.wal`
 
 ### Phase 5 — Recovery (DONE)
+
 - loadWALEntries rewritten for crash tolerance: parses entries sequentially, stops at first corrupt/partial entry instead of returning a hard error
 - Partial entry repair: WAL file is truncated to the byte offset of the last valid entry, removing trailing garbage from crash mid-write
 - Valid entries are preserved in WAL after repair (not removed) — protects against a second crash before Close() saves a snapshot
@@ -116,6 +454,7 @@ engine/
 - Replaced bufio.Scanner with os.ReadFile + manual byte-offset tracking for precise truncation positioning
 
 ### Phase 6 — Transactions (DONE)
+
 - Tx struct with overlay map for transaction-local reads: tx.Get sees uncommitted tx.Set/tx.Delete changes
 - tx.Set, tx.Get, tx.Delete, tx.Exists — mirror DB API but buffer mutations in overlay
 - DB.Transaction(fn) — functional API: fn returns nil → COMMIT, fn returns error → ROLLBACK
@@ -128,6 +467,7 @@ engine/
 - Empty key validation on all Tx methods
 
 ### Phase 7 — Concurrency (DONE)
+
 - Full concurrency audit of all code paths for data races
 - **Bug fixed:** Close() previously released the write lock before operating on WAL/storage — concurrent Set/Delete could write to a closing WAL. Now Close() holds the exclusive lock for its entire duration (snapshot + save + truncate + close)
 - Added `closed bool` field to DB struct, checked under lock in all public methods
@@ -138,6 +478,7 @@ engine/
 - Value type is race-free by design: passed by value, constructors copy slices/maps, accessors return copies
 
 ### Phase 8 — Snapshots (DONE)
+
 - Added public `db.Snapshot()` method — saves current state to storage and truncates WAL without closing the database
 - Extracted internal `db.checkpoint()` method — shared implementation between Snapshot() and Close()
 - Refactored `Close()` to call `checkpoint()` then close file handles — eliminates code duplication
@@ -148,6 +489,7 @@ engine/
 - No automatic/periodic snapshotting — callers control when to checkpoint (e.g. via goroutine + ticker)
 
 ### Phase 9 — Deterministic Verification (DONE)
+
 - Added `seq uint64` to state — monotonically increasing counter, incremented on every successful `state.apply()`
 - `db.Seq() uint64` — returns current sequence number (operation ID / position in history)
 - `db.StateHash() ([32]byte, error)` — computes SHA-256 of entire state (data only, NOT seq)
@@ -160,6 +502,7 @@ engine/
 - No changes to Storage interface, WAL format, or json_storage — seq piggybacks on existing data map
 
 ### Phase 10 — Prefixes/Namespaces (DONE)
+
 - `db.Keys("user:")` — returns all keys matching a prefix (variadic: `db.Keys()` with no args still returns all keys)
 - `db.Prefix("user:")` — returns `map[Key]Value` of all key-value pairs matching a prefix
 - `state.keysWithPrefix(prefix)` and `state.prefix(prefix)` — internal helpers using `strings.HasPrefix`
@@ -167,20 +510,35 @@ engine/
 - Pure filtering layer — no changes to operations, WAL, storage, or transactions
 - Returns nil if database is closed (consistent with other read methods)
 
-## Development Roadmap (Remaining)
+## Future Work
 
-Phases 0–10 are complete. Future work:
+- **Indexes** — secondary indexes for fast lookups by value fields
+- **References / Relations** — cross-key references with integrity
+- **Document-level updates** — PATCH operations for partial Object updates
+- **Compaction** — WAL compaction and snapshot optimization
+- **Advanced querying** — range queries, filtering, sorting
+- **Query planner** — cost-based query optimization
+- **MVCC** — multi-version concurrency control for snapshot isolation
+- **Time travel** — read state at a previous sequence number
+- **Replication** — operation log shipping to replicas
+- **Binary storage format** — replace JSON with a compact binary format
+- **File locking** — prevent multiple processes from corrupting the same file
+- **Group commit** — batch WAL fsyncs for higher write throughput
+- **Incremental hashing** — maintain running hash instead of recomputing from scratch
+- **Comprehensive test suite** — tests were removed during development and need to be rewritten
 
-## Rules
+## Build and Verify
 
-- Do NOT implement a query language
-- Do NOT skip tests
-- Do NOT introduce abstractions without concrete need
-- Correctness before performance
-- Every mutation must be representable as a deterministic operation (enforced from Phase 3)
-- Snapshots are checkpoints, not canonical history
-- Keep the engine embeddable (no server, no network)
+```bash
+# Build
+go build ./engine/
 
-## Environment Notes
+# Vet
+go vet ./engine/
 
-- Race detector (`go test -race`) requires 64-bit CGO compiler, not available in current dev environment. Test without `-race` for now; use `-race` in CI.
+# Test (when tests exist)
+go test ./engine/ -v -count=1
+
+# Race detector (requires CGO)
+go test ./engine/ -race -count=1
+```

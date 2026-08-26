@@ -1,3 +1,3 @@
-module github.com/MehulxBuilds/native-db
+module github.com/MehulxBuilds/dora
 
 go 1.24.5
