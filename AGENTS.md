@@ -10,7 +10,9 @@
 ## Architecture
 
 ```
-Public Go API  (db.go)
+Public Go API  (db.go, tx.go)
+      |
+  Transaction Layer  (tx.go)
       |
   Operation Model  (operation.go)
       |
@@ -34,8 +36,9 @@ JSON is a serialization format, NOT the core architecture. The Value type is a d
 ```
 engine/
   db.go            — DB struct, public API (Open, Close, Set, Get, Delete, Exists, Len, Keys), sync.RWMutex
+  tx.go            — Tx struct, tx.Set/Get/Delete/Exists, DB.Transaction (atomic commit/rollback)
   operation.go     — OpType (SET, DELETE), Operation struct, state.apply (deterministic state transition)
-  wal.go           — WAL struct, append (write+fsync), loadWALEntries (replay), truncate, JSON Lines format
+  wal.go           — WAL struct, append (write+fsync), appendBatch (TX entry), loadWALEntries (replay), truncate, JSON Lines format
   state.go         — state struct (internal), in-memory keyspace, snapshot/load
   key.go           — Key type alias (currently string)
   value.go         — Value type with typed constructors/accessors
@@ -112,9 +115,20 @@ engine/
 - Semantic errors (unknown op type, SET without value) still return hard errors — these indicate real corruption, not partial writes
 - Replaced bufio.Scanner with os.ReadFile + manual byte-offset tracking for precise truncation positioning
 
+### Phase 6 — Transactions (DONE)
+- Tx struct with overlay map for transaction-local reads: tx.Get sees uncommitted tx.Set/tx.Delete changes
+- tx.Set, tx.Get, tx.Delete, tx.Exists — mirror DB API but buffer mutations in overlay
+- DB.Transaction(fn) — functional API: fn returns nil → COMMIT, fn returns error → ROLLBACK
+- Atomicity: all operations committed to WAL as single TX entry, or none (rollback discards overlay)
+- WAL TX entry: `{"type":"TX","ops":[...]}` — single JSON line, single write+fsync, all-or-nothing
+- wal.appendBatch(ops) — serializes transaction as one atomic WAL entry
+- loadWALEntries updated to unpack TX entries into flat operation list during replay
+- Serialized transactions: exclusive write lock held for entire transaction duration
+- Read-only transactions produce no WAL entry
+- Empty key validation on all Tx methods
+
 ## Development Roadmap (Remaining)
 
-- **Phase 6** — Transactions (BEGIN/COMMIT/ROLLBACK, atomicity)
 - **Phase 7** — Concurrency (race detector testing, advanced locking if needed)
 - **Phase 8** — Snapshots (periodic checkpoints, snapshot + WAL replay for recovery)
 - **Phase 9** — Deterministic Verification (operation IDs, sequence numbers, state hashing)

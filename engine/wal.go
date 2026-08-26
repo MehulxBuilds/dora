@@ -10,13 +10,18 @@ import (
 // walEntry is the on-disk representation of a single WAL record.
 // Each entry is stored as one JSON line in the WAL file.
 //
-// The Type field uses the human-readable string form ("SET", "DELETE")
+// The Type field uses the human-readable string form ("SET", "DELETE", "TX")
 // rather than the numeric OpType, keeping the WAL inspectable with any
 // text editor or command-line tool.
+//
+// For individual operations (SET, DELETE): Key and Value are populated.
+// For transactions (TX): Ops contains the list of sub-operations as a
+// single atomic group. Key and Value are empty.
 type walEntry struct {
-	Type  string `json:"type"`
-	Key   Key    `json:"key"`
-	Value *Value `json:"value,omitempty"` // present for SET, absent for DELETE
+	Type  string     `json:"type"`
+	Key   Key        `json:"key,omitempty"`
+	Value *Value     `json:"value,omitempty"` // present for SET, absent for DELETE/TX
+	Ops   []walEntry `json:"ops,omitempty"`   // present for TX, absent for SET/DELETE
 }
 
 // wal is the write-ahead log for the database engine.
@@ -80,6 +85,46 @@ func (w *wal) append(op Operation) error {
 	}
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("WAL sync: %w", err)
+	}
+	return nil
+}
+
+// appendBatch writes a group of operations to the WAL as a single atomic
+// entry (type "TX") and fsyncs it to disk.
+//
+// This is the WAL mechanism for transaction atomicity. The entire group
+// is serialized as one JSON line:
+//
+//	{"type":"TX","ops":[{"type":"SET","key":"a","value":1},{"type":"DELETE","key":"b"}]}
+//
+// Because it's a single write+fsync, either the entire transaction is
+// durable or none of it is. If the process crashes mid-write, recovery
+// will see an incomplete JSON line and discard it — no partial commits.
+func (w *wal) appendBatch(ops []Operation) error {
+	sub := make([]walEntry, len(ops))
+	for i, op := range ops {
+		sub[i] = walEntry{
+			Type: op.Type.String(),
+			Key:  op.Key,
+		}
+		if op.Type == OpSet {
+			sub[i].Value = &op.Value
+		}
+	}
+
+	tx := walEntry{Type: "TX", Ops: sub}
+
+	data, err := json.Marshal(tx)
+	if err != nil {
+		return fmt.Errorf("WAL marshal tx: %w", err)
+	}
+	data = append(data, '\n')
+
+	if _, err := w.file.Write(data); err != nil {
+		return fmt.Errorf("WAL write tx: %w", err)
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("WAL sync tx: %w", err)
 	}
 	return nil
 }
@@ -160,7 +205,7 @@ func loadWALEntries(path string) ([]Operation, error) {
 			return nil, err
 		}
 
-		ops = append(ops, op)
+		ops = append(ops, op...)
 		pos = nextPos
 		validEnd = pos
 	}
@@ -176,24 +221,36 @@ func loadWALEntries(path string) ([]Operation, error) {
 	return ops, nil
 }
 
-// entryToOperation converts an on-disk walEntry back into an Operation.
-func entryToOperation(e walEntry) (Operation, error) {
-	var op Operation
-	op.Key = e.Key
-
+// entryToOperation converts an on-disk walEntry into one or more Operations.
+//
+// For SET and DELETE entries, returns a single-element slice.
+// For TX entries, recursively unpacks all sub-operations into a flat slice,
+// preserving the original operation order.
+func entryToOperation(e walEntry) ([]Operation, error) {
 	switch e.Type {
 	case "SET":
-		op.Type = OpSet
 		if e.Value == nil {
-			return op, fmt.Errorf("WAL SET entry missing value for key %q", e.Key)
+			return nil, fmt.Errorf("WAL SET entry missing value for key %q", e.Key)
 		}
-		op.Value = *e.Value
+		return []Operation{{Type: OpSet, Key: e.Key, Value: *e.Value}}, nil
+
 	case "DELETE":
-		op.Type = OpDelete
+		return []Operation{{Type: OpDelete, Key: e.Key}}, nil
+
+	case "TX":
+		var ops []Operation
+		for _, sub := range e.Ops {
+			subOps, err := entryToOperation(sub)
+			if err != nil {
+				return nil, fmt.Errorf("WAL TX sub-entry: %w", err)
+			}
+			ops = append(ops, subOps...)
+		}
+		return ops, nil
+
 	default:
-		return op, fmt.Errorf("WAL unknown operation type: %q", e.Type)
+		return nil, fmt.Errorf("WAL unknown operation type: %q", e.Type)
 	}
-	return op, nil
 }
 
 // truncate clears the WAL file, resetting it to empty.
