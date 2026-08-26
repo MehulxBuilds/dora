@@ -61,14 +61,18 @@ func (db *DB) Close() error {
 // Set stores a value for the given key.
 // If the key already exists, its value is overwritten.
 // Returns ErrKeyEmpty if the key is empty.
+//
+// Internally, Set creates an OpSet operation and applies it to the state.
+// In future phases, the operation will be written to the WAL before applying.
 func (db *DB) Set(key Key, val Value) error {
 	if key == "" {
 		return ErrKeyEmpty
 	}
+	op := Operation{Type: OpSet, Key: key, Value: val}
 	db.mu.Lock()
-	db.state.set(key, val)
+	err := db.state.apply(op)
 	db.mu.Unlock()
-	return nil
+	return err
 }
 
 // Get retrieves the value for the given key.
@@ -87,12 +91,16 @@ func (db *DB) Get(key Key) (Value, error) {
 // Delete removes a key and its value from the database.
 // Returns ErrKeyNotFound if the key does not exist.
 // Returns ErrKeyEmpty if the key is empty.
+//
+// Internally, Delete creates an OpDelete operation and applies it to the state.
+// In future phases, the operation will be written to the WAL before applying.
 func (db *DB) Delete(key Key) error {
 	if key == "" {
 		return ErrKeyEmpty
 	}
+	op := Operation{Type: OpDelete, Key: key}
 	db.mu.Lock()
-	err := db.state.delete(key)
+	err := db.state.apply(op)
 	db.mu.Unlock()
 	return err
 }
