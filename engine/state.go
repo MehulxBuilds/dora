@@ -14,9 +14,11 @@ import (
 // state is an internal type. It is not exposed through the public API.
 // The DB struct owns and operates on a state instance.
 type state struct {
-	data map[Key]Value
-	seq  uint64 // monotonically increasing, incremented on each successful apply
+	indexes map[string]*secondaryIndex
+	data    map[Key]Value
+	seq     uint64 // monotonically increasing, incremented on each successful apply
 }
+
 // newStateFrom creates a state pre-populated with the given data.
 // Used when loading from storage. The map is taken directly (not copied),
 // since the caller (storage layer) is handing ownership to the state.

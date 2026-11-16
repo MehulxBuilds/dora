@@ -512,8 +512,6 @@ Single `sync.RWMutex` on DB. State has no locks. WAL has no locks (always access
 
 ## Future Work
 
-- **Indexes** — secondary indexes for fast lookups by value fields
-- **References / Relations** — cross-key references with integrity
 - **Document-level updates** — PATCH operations for partial Object updates
 - **Compaction** — WAL compaction and snapshot optimization
 - **Advanced querying** — range queries, filtering, sorting
@@ -525,7 +523,7 @@ Single `sync.RWMutex` on DB. State has no locks. WAL has no locks (always access
 - **File locking** — prevent multiple processes from corrupting the same file
 - **Group commit** — batch WAL fsyncs for higher write throughput
 - **Incremental hashing** — maintain running hash instead of recomputing from scratch
-- **Comprehensive test suite** — tests were removed during development and need to be rewritten
+- **Comprehensive test suite** — reference tests now exist; broader engine coverage remains future work
 
 ## Build and Verify
 
@@ -542,3 +540,43 @@ go test ./engine/ -v -count=1
 # Race detector (requires CGO)
 go test ./engine/ -race -count=1
 ```
+
+## Phase 11 - References / Relations (DONE)
+
+- `TypeReference`, `NewReference(key)`, and `Value.Reference()` represent typed cross-key references, including inside arrays and objects.
+- Targets must exist in the final state. Empty targets return `ErrReferenceNotFound`; deleting a target still referenced by another live value returns `ErrKeyReferenced`.
+- Self-references and cycles are allowed. Reads return references without automatic traversal.
+- DB writes validate before WAL append; transactions validate the complete final overlay before committing. Forward references and deleting related keys in either order are supported within a transaction.
+- Recovery replays operations without per-operation integrity checks, then validates the recovered state before opening the WAL handle.
+- JSON encodes references as `{"\u0000_ref":"target"}`. Objects containing either reserved marker (`\u0000_ref`, `\u0000_object`) are escaped inside a `\u0000_object` wrapper to preserve their type. Historical files using these exact marker shapes are ambiguous and require migration before opening.
+- Integrity validation copies/scans the final keyspace and recursively visits values; no reverse index or cascading deletes yet.
+- `engine/reference.go` contains deterministic validation. `engine/reference_test.go` covers integrity, transaction atomicity, encoding collisions, WAL replay and snapshots.
+
+## Documentation workflow
+
+- `main.go` includes runnable reference examples in an isolated in-memory database: nested object/array references, forward references in a transaction, explicit target lookup, missing-target errors, protected deletion, and atomic deletion of related records. Run with `go run .`; the existing basic demo also writes `dora/demo.db`.
+
+Always update AGENTS.md and README.md at the end of implementation work to describe the resulting behavior and limitations.
+
+## Phase 12 - Secondary Indexes (DONE)
+
+- `engine/index.go`: `DB.CreateIndex(name, prefix, field)`, `DB.DropIndex(name)`, `DB.Lookup(name, value)`, and `Tx.Lookup(name, value)`.
+- Non-unique exact-match indexes select literal top-level object fields from prefix-matching keys. Empty prefix selects all keys; empty index names/fields are rejected.
+- Scalar buckets distinguish null, boolean, finite number, string, and reference types. References match their target key without traversal; numeric negative zero equals zero. Missing fields, non-object records, arrays, objects, and non-finite numbers are excluded.
+- Lookup returns sorted, independent key slices (empty slice on no match). Unsupported lookup values return `ErrIndexValue`; missing indexes return `ErrIndexNotFound`; duplicate names return `ErrIndexExists`; invalid definitions return `ErrIndexInvalid`.
+- State owns derived index buckets. `state.apply` updates them on SET/DELETE and builds/removes them for `OpCreateIndex`/`OpDropIndex`. Public methods validate, acquire DB locks, and write WAL before applying changes.
+- Index creation/drop increment Seq but do not affect data-only StateHash. Create/drop are DB methods only; inside transaction callbacks use Tx.Lookup and never call DB methods.
+- Transactions combine committed candidates with the overlay for lookups; commit maintains buckets through normal operations, rollback leaves indexes unchanged.
+- WAL adds CREATE_INDEX/DROP_INDEX records with an index definition. Snapshots store definitions under reserved `\x00_indexes`, removed before exposing data. Buckets are rebuilt from snapshot records when definitions load and maintained during replay; buckets are never serialized.
+- Reserved snapshot metadata keys must not be used as application keys. Existing files using `\x00_indexes` as user data require migration.
+- Index creation scans existing data under the write lock. Bucket lookups cost O(matches + sorting); Tx.Lookup additionally scans the overlay. Write-time reference validation still scans the keyspace.
+- `main.go` uses the persistent demo DB for index examples. `engine/index_test.go` covers maintenance, scalar distinctions, rollback, transaction visibility, WAL failure, snapshots, and crash recovery.
+- Deferred: unique constraints (next addition), nested paths, compound indexes, ranges, and query planning.
+- Verification: `go test ./... -count=1`, `go vet ./...`, and `go build ./...` pass. Race verification requires a working 64-bit C compiler (the installed compiler previously failed).
+
+## Restart-safe index initialization
+
+- `DB.EnsureIndex(name, prefix, field)` shares the locked create path with CreateIndex. Missing definitions are created normally; identical definitions are a no-op (no WAL write, bucket rebuild, or Seq increment).
+- A same-name definition with a different prefix or field returns `ErrIndexConflict`. CreateIndex retains strict `ErrIndexExists` semantics.
+- `main.go` uses EnsureIndex and keeps the index for subsequent runs rather than dropping it at the end.
+- `TestEnsureIndexRestart` verifies reopen, lookup, unchanged WAL/Seq on reuse, conflicts, strict CreateIndex, and invalid/closed guards.

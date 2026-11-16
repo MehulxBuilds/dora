@@ -628,6 +628,75 @@ Both files are designed to be inspected and debugged by humans. A future binary 
 
 ---
 
+## References / Relations
+
+Run `go run .` to try the examples in `main.go`. The reference examples use the persistent demo database and demonstrate object/array references, forward references, following a target, integrity errors, and deleting related records in one transaction. The basic persistence example also writes `dora/demo.db`.
+
+Use `engine.NewReference(key)` to store a typed reference, including inside an object or array. `Value.Reference()` returns `(targetKey, true)` for reference values. `Get` returns the stored value; follow the target explicitly with another `Get`.
+
+```go
+err := db.Transaction(func(tx *engine.Tx) error {
+    // Forward references are checked against the final transaction state.
+    if err := tx.Set("post:1", engine.NewObject(map[string]engine.Value{
+        "author": engine.NewReference("user:1"),
+    })); err != nil {
+        return err
+    }
+    return tx.Set("user:1", engine.NewString("Mehul"))
+})
+if err != nil {
+    return err
+}
+```
+
+Missing or empty targets produce `engine.ErrReferenceNotFound`. Deleting a key that remains referenced produces `engine.ErrKeyReferenced`. Check errors with `errors.Is`. Rejected changes leave state, sequence and WAL unchanged. Remove references or delete related keys together in a transaction; there are no cascading deletes. Self-references and cycles are supported.
+
+References survive WAL recovery and snapshots. Their JSON encoding is `{"\u0000_ref":"user:1"}`. Ordinary objects using reserved fields `\u0000_ref` or `\u0000_object` are escaped with an object wrapper. Existing hand-authored files using these exact marker shapes need migration before opening because their original intent cannot be inferred.
+
+Integrity checks currently copy and scan the final keyspace, recursively examining values. Transactions validate once at commit, allowing temporary dangling references inside the callback. Recovery validates the final recovered state.
+
+## Secondary indexes
+
+Create a non-unique exact-match index on a top-level object field:
+
+```go
+if err := db.CreateIndex("users_email", "user:", "email"); err != nil {
+    return err
+}
+keys, err := db.Lookup("users_email", engine.NewString("mehul@example.com"))
+if err != nil {
+    return err
+}
+// keys contains matching database keys, sorted lexicographically.
+```
+
+Creation indexes existing records as well as future writes. Set, overwrite, delete, and committed transactions maintain the index automatically. Multiple records may have the same value. Inside transaction callbacks, use `tx.Lookup(...)` to see uncommitted changes; calling DB methods there would deadlock.
+
+`db.DropIndex("users_email")` removes the index while keeping the records. Run `go run .` for startup initialization, lookup, and transaction examples in `main.go`.
+
+- The prefix filters database keys; an empty prefix includes all keys.
+- Field names are literal: `"author.email"` selects a field with that exact name, not a nested path.
+- Supported values: null, boolean, finite number, string, and reference. Types stay distinct; a reference matches its target key without following it. Numeric positive and negative zero match.
+- Missing fields, non-object records, array/object fields, and non-finite numbers are not indexed. Explicit null is indexed.
+- Lookups return sorted copies, with an empty slice when no records match. Unsupported lookup values return `ErrIndexValue`.
+- Duplicate names return `ErrIndexExists`; unknown names return `ErrIndexNotFound`; empty names/fields return `ErrIndexInvalid`. Check errors with `errors.Is`. Closed DB methods return `ErrClosed`.
+
+Index definitions survive snapshots and WAL recovery. Snapshot metadata uses reserved `\u0000_indexes`; do not use reserved metadata keys for application data. Existing files using this key as ordinary data need migration. Index buckets are derived in memory rather than persisted. Creation and drop each increment `Seq()`; `StateHash()` continues to cover only record data.
+
+Creation scans records under the exclusive lock. Lookups read matching buckets and sort results; transaction lookups also scan the overlay. Existing reference integrity validation still scans data on writes. Unique constraints, nested paths, compound indexes, range queries, and automatic query planning are deferred.
+
+### Initialize indexes on startup
+
+Indexes persist across restarts. Use `EnsureIndex` in startup code:
+
+```go
+if err := db.EnsureIndex("users_email", "user:", "email"); err != nil {
+    return err
+}
+```
+
+It creates a missing index and reuses an existing matching definition without rebuilding, writing the WAL, or incrementing Seq. If the same name has a different prefix or field, it returns `ErrIndexConflict`; it does not silently change the index. `CreateIndex` remains strict and returns `ErrIndexExists` for duplicate names. The persistent `main.go` example uses `EnsureIndex` and keeps the index across runs.
+
 ## License
 
 MIT

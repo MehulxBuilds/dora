@@ -164,6 +164,10 @@ func (db *DB) Transaction(fn func(tx *Tx) error) error {
 		return nil // read-only transaction, nothing to commit
 	}
 
+	if err := db.validateChanges(tx.overlay); err != nil {
+		return err
+	}
+
 	if db.wal != nil {
 		if err := db.wal.appendBatch(tx.ops); err != nil {
 			return err

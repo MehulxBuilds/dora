@@ -6,12 +6,13 @@ import "fmt"
 type ValueType int
 
 const (
-	TypeNull    ValueType = iota // Null represents a null/nil value.
-	TypeBoolean                  // Boolean represents true or false.
-	TypeNumber                   // Number represents a numeric value (float64).
-	TypeString                   // String represents a text value.
-	TypeArray                    // Array represents an ordered list of Values.
-	TypeObject                   // Object represents a key-value map of string to Value.
+	TypeNull      ValueType = iota // Null represents a null/nil value.
+	TypeBoolean                    // Boolean represents true or false.
+	TypeNumber                     // Number represents a numeric value (float64).
+	TypeString                     // String represents a text value.
+	TypeArray                      // Array represents an ordered list of Values.
+	TypeObject                     // Object represents a key-value map of string to Value.
+	TypeReference                  // Reference identifies another database key.
 )
 
 // String returns a human-readable name for the ValueType.
@@ -27,6 +28,8 @@ func (t ValueType) String() string {
 		return "String"
 	case TypeArray:
 		return "Array"
+	case TypeReference:
+		return "Reference"
 	case TypeObject:
 		return "Object"
 	default:
@@ -148,4 +151,15 @@ func (v Value) Object() (map[string]Value, bool) {
 		cp[k] = val
 	}
 	return cp, true
+}
+
+// NewReference creates a reference to a database key. Integrity is checked on write.
+func NewReference(key Key) Value { return Value{typ: TypeReference, data: key} }
+
+// Reference returns the target key if this value is a Reference.
+func (v Value) Reference() (Key, bool) {
+	if v.typ != TypeReference {
+		return "", false
+	}
+	return v.data.(string), true
 }

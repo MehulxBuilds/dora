@@ -30,8 +30,17 @@ func (v Value) MarshalJSON() ([]byte, error) {
 		return json.Marshal(v.data.(string))
 	case TypeArray:
 		return json.Marshal(v.data.([]Value))
+	case TypeReference:
+		return json.Marshal(map[string]string{referenceTag: v.data.(string)})
 	case TypeObject:
-		return json.Marshal(v.data.(map[string]Value))
+		fields := v.data.(map[string]Value)
+		if _, ok := fields[referenceTag]; ok {
+			return json.Marshal(map[string]interface{}{objectTag: fields})
+		}
+		if _, ok := fields[objectTag]; ok {
+			return json.Marshal(map[string]interface{}{objectTag: fields})
+		}
+		return json.Marshal(fields)
 	default:
 		return nil, fmt.Errorf("cannot marshal unknown ValueType(%d)", int(v.typ))
 	}
@@ -89,16 +98,31 @@ func valueFromInterface(raw interface{}) (Value, error) {
 		}
 		return NewArray(items), nil
 	case map[string]interface{}:
-		fields := make(map[string]Value, len(v))
-		for k, item := range v {
-			val, err := valueFromInterface(item)
-			if err != nil {
-				return NewNull(), err
+		if len(v) == 1 {
+			if target, ok := v[referenceTag].(string); ok {
+				return NewReference(target), nil
 			}
-			fields[k] = val
+			if fields, ok := v[objectTag].(map[string]interface{}); ok {
+				return objectFromInterface(fields)
+			}
 		}
-		return NewObject(fields), nil
+		return objectFromInterface(v)
 	default:
 		return NewNull(), fmt.Errorf("unexpected type %T during JSON unmarshal", raw)
 	}
+}
+
+const referenceTag = "\x00_ref"
+const objectTag = "\x00_object"
+
+func objectFromInterface(v map[string]interface{}) (Value, error) {
+	fields := make(map[string]Value, len(v))
+	for k, item := range v {
+		val, err := valueFromInterface(item)
+		if err != nil {
+			return NewNull(), err
+		}
+		fields[k] = val
+	}
+	return NewObject(fields), nil
 }
