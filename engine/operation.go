@@ -11,6 +11,8 @@ const (
 
 	// OpDelete represents a key removal.
 	OpDelete
+	OpCreateIndex
+	OpDropIndex
 )
 
 // String returns a human-readable name for the OpType.
@@ -20,6 +22,10 @@ func (t OpType) String() string {
 		return "SET"
 	case OpDelete:
 		return "DELETE"
+	case OpCreateIndex:
+		return "CREATE_INDEX"
+	case OpDropIndex:
+		return "DROP_INDEX"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", int(t))
 	}
@@ -34,6 +40,7 @@ func (t OpType) String() string {
 // For OpSet, Key and Value are both required.
 // For OpDelete, only Key is required; Value is ignored.
 type Operation struct {
+	Index IndexDefinition // meaningful for index creation/removal
 	Type  OpType
 	Key   Key
 	Value Value // meaningful only for OpSet
@@ -53,6 +60,12 @@ type Operation struct {
 func (s *state) apply(op Operation) error {
 	switch op.Type {
 	case OpSet:
+		for _, idx := range s.indexes {
+			if old, ok := s.data[op.Key]; ok {
+				idx.remove(op.Key, old)
+			}
+			idx.add(op.Key, op.Value)
+		}
 		s.data[op.Key] = op.Value
 		s.seq++
 		return nil
@@ -60,7 +73,28 @@ func (s *state) apply(op Operation) error {
 		if _, ok := s.data[op.Key]; !ok {
 			return ErrKeyNotFound
 		}
+		for _, idx := range s.indexes {
+			idx.remove(op.Key, s.data[op.Key])
+		}
 		delete(s.data, op.Key)
+		s.seq++
+		return nil
+	case OpCreateIndex:
+		if !validIndex(op.Index) {
+			return ErrIndexInvalid
+		}
+		if s.indexes == nil {
+			s.indexes = make(map[string]*secondaryIndex)
+		}
+		idx := &secondaryIndex{definition: op.Index, buckets: make(map[indexToken]map[Key]struct{})}
+		for key, value := range s.data {
+			idx.add(key, value)
+		}
+		s.indexes[op.Index.Name] = idx
+		s.seq++
+		return nil
+	case OpDropIndex:
+		delete(s.indexes, op.Index.Name)
 		s.seq++
 		return nil
 	default:

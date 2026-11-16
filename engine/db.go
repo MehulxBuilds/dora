@@ -91,8 +91,15 @@ func Open(path string) (*DB, error) {
 		delete(data, metaSeqKey)
 	}
 
+	indexMeta, hasIndexes := data[metaIndexesKey]
+	delete(data, metaIndexesKey)
 	s := newStateFrom(data)
 	s.seq = seq
+	if hasIndexes {
+		if err := s.loadIndexes(indexMeta); err != nil {
+			return nil, err
+		}
+	}
 
 	// For persistent databases, set up the WAL.
 	var w *wal
@@ -112,6 +119,10 @@ func Open(path string) (*DB, error) {
 			// that delete (crash between snapshot save and WAL truncate).
 			// SET operations never fail. The end result is always correct.
 			_ = s.apply(op)
+		}
+
+		if err := validateReferences(s.data, nil); err != nil {
+			return nil, err
 		}
 
 		w, err = openWAL(walPath)
@@ -213,6 +224,9 @@ func (db *DB) Snapshot() error {
 func (db *DB) checkpoint() error {
 	snap := db.state.snapshot()
 	snap[metaSeqKey] = NewNumber(float64(db.state.seq))
+	if len(db.state.indexes) > 0 {
+		snap[metaIndexesKey] = db.state.indexSnapshot()
+	}
 
 	if err := db.storage.Save(snap); err != nil {
 		return err
@@ -249,6 +263,9 @@ func (db *DB) Set(key Key, val Value) error {
 	defer db.mu.Unlock()
 	if db.closed {
 		return ErrClosed
+	}
+	if err := db.validateChanges(map[Key]txOverlay{key: {value: val}}); err != nil {
+		return err
 	}
 	if db.wal != nil {
 		if err := db.wal.append(op); err != nil {
@@ -302,6 +319,9 @@ func (db *DB) Delete(key Key) error {
 		return ErrKeyNotFound
 	}
 	op := Operation{Type: OpDelete, Key: key}
+	if err := db.validateChanges(map[Key]txOverlay{key: {deleted: true}}); err != nil {
+		return err
+	}
 	if db.wal != nil {
 		if err := db.wal.append(op); err != nil {
 			return err

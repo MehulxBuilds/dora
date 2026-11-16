@@ -17,10 +17,11 @@ import (
 // For transactions (TX): Ops contains the list of sub-operations as a
 // single atomic group. Key and Value are empty.
 type walEntry struct {
-	Type  string     `json:"type"`
-	Key   Key        `json:"key,omitempty"`
-	Value *Value     `json:"value,omitempty"` // present for SET, absent for DELETE/TX
-	Ops   []walEntry `json:"ops,omitempty"`   // present for TX, absent for SET/DELETE
+	Index *IndexDefinition `json:"index,omitempty"`
+	Type  string           `json:"type"`
+	Key   Key              `json:"key,omitempty"`
+	Value *Value           `json:"value,omitempty"` // present for SET, absent for DELETE/TX
+	Ops   []walEntry       `json:"ops,omitempty"`   // present for TX, absent for SET/DELETE
 }
 
 // wal is the write-ahead log for the database engine.
@@ -73,6 +74,9 @@ func (w *wal) append(op Operation) error {
 		entry.Value = &op.Value
 	}
 
+	if op.Type == OpCreateIndex || op.Type == OpDropIndex {
+		entry.Index = &op.Index
+	}
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("WAL marshal: %w", err)
@@ -160,8 +164,8 @@ func loadWALEntries(path string) ([]Operation, error) {
 	}
 
 	var ops []Operation
-	pos := 0       // current read position in content
-	validEnd := 0  // byte offset past the last valid entry (for truncation)
+	pos := 0      // current read position in content
+	validEnd := 0 // byte offset past the last valid entry (for truncation)
 	needsRepair := false
 
 	for pos < len(content) {
@@ -236,6 +240,18 @@ func entryToOperation(e walEntry) ([]Operation, error) {
 	case "DELETE":
 		return []Operation{{Type: OpDelete, Key: e.Key}}, nil
 
+	case "CREATE_INDEX", "DROP_INDEX":
+		if e.Index == nil || e.Index.Name == "" {
+			return nil, ErrIndexInvalid
+		}
+		typ := OpDropIndex
+		if e.Type == "CREATE_INDEX" {
+			if !validIndex(*e.Index) {
+				return nil, ErrIndexInvalid
+			}
+			typ = OpCreateIndex
+		}
+		return []Operation{{Type: typ, Index: *e.Index}}, nil
 	case "TX":
 		var ops []Operation
 		for _, sub := range e.Ops {
