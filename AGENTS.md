@@ -613,3 +613,17 @@ Studio TS/TSX/CSS/HTML uses Prettier formatting (2-space indentation, single quo
 - Tests cover default/custom/nested/WAL-only discovery, deduplication, errors and argument handling, catalog routing, and rejection of arbitrary database paths.
 
 Directory discovery verification: frontend build, Go tests/vet/build and CLI smoke passed. The compiled dora executable was run from a separate application root using both default dora/ discovery and an absolute --path override; database selection worked and all file hashes remained unchanged.
+
+Studio styling uses Tailwind utilities and shadcn components, with self-hosted Geist Sans throughout (including JSON). Theme CSS contains tokens and base layers only; bespoke application CSS classes are removed.
+
+## Studio dark interface
+
+Studio always uses dark mode, including initial HTML and native control color scheme. The interface uses Tailwind utilities and shadcn controls, with self-hosted Geist Sans for every label and JSON value. No application CSS classes or mono fonts are used. The layout has a compact desktop namespace sidebar, mobile database/namespace selectors, consistent icon sizing, structured tables, and a keyboard-dismissable record inspector.
+
+Database, tab, namespace, key search, pagination, index selection and record inspection are reflected in the URL. Studio handles empty/invalid API responses with connection guidance. In frontend development, start the Go backend on port 7432 (`go run ./cli/cmd/dora studio --no-open`) before Vite; Vite alone cannot read database files. Restart the Go CLI after rebuilding the embedded frontend.
+
+Validation: `cd studio && npm run build`; `node --test --test-isolation=none tests/read-api.test.mjs` checks successful reads and malformed/offline API errors. Browser rendering and keyboard interaction still require an actual browser check.
+
+Keep generated shadcn components in `studio/src/components/ui/` unchanged. Apply Studio-specific styling through component props, Tailwind utilities, or wrappers in `components/studio/`. TypeScript checks the application from `src/main.tsx` and its imports.
+
+Studio uses a viewport-height shell: the top bar and desktop sidebar remain in place while the main content pane scrolls independently. Long namespace lists scroll inside the sidebar without moving its header or footer. Default shadcn components remain unchanged.

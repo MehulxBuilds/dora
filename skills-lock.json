@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "skills": {
+    "ui-sdk": {
+      "source": "vercel-labs/ui",
+      "commit": "564de0b21ef4bbd0baa2890194adbbf03d0a477d",
+      "sourceType": "github",
+      "skillPath": "packages/core/skills/ui-sdk/SKILL.md",
+      "computedHash": "7353586d36e12a3895bcec7d6d589ad26a18e7acff95b014ea63ccb12cfafc38"
+    },
+    "web-design-guidelines": {
+      "source": "vercel-labs/agent-skills",
+      "commit": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
+      "sourceType": "github",
+      "skillPath": "skills/web-design-guidelines/SKILL.md",
+      "computedHash": "4f68ae07187fb0d1fb78c88b503d089da4cf5a9d9625d1f2e425b1590bf96d92"
+    }
+  }
+}
