@@ -774,3 +774,5 @@ Validation: `cd studio && npm run build`; `node --test --test-isolation=none tes
 Keep generated shadcn components in `studio/src/components/ui/` unchanged. Apply Studio-specific styling through component props, Tailwind utilities, or wrappers in `components/studio/`. TypeScript checks the application from `src/main.tsx` and its imports.
 
 Studio uses a viewport-height shell: the top bar and desktop sidebar remain in place while the main content pane scrolls independently. Long namespace lists scroll inside the sidebar without moving its header or footer. Default shadcn components remain unchanged.
+
+Studio pagination uses a proper range separator and singular/plural record labels: `1 of 1 record`, `1-50 of 100 records`, and `0 records`.

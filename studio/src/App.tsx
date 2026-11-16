@@ -535,7 +535,7 @@ export default function App() {
                 <div className="flex flex-wrap items-center justify-between gap-3 border-t px-4 py-3 text-[11px] text-muted-foreground sm:px-5">
                   <span aria-live="polite" className="tabular-nums">
                     {filtered.length
-                      ? `${currentPage * 50 + 1}?${Math.min((currentPage + 1) * 50, filtered.length)} of ${numbers.format(filtered.length)} records`
+                      ? `${visible.length === 1 ? numbers.format(currentPage * 50 + 1) : `${numbers.format(currentPage * 50 + 1)}\u2013${numbers.format(Math.min((currentPage + 1) * 50, filtered.length))}`} of ${numbers.format(filtered.length)} ${filtered.length === 1 ? 'record' : 'records'}`
                       : '0 records'}
                   </span>
                   <div className="flex items-center gap-2">
