@@ -6,3 +6,5 @@ node_modules/
 # Embed the compiled Studio UI in Go builds.
 !/studio/dist/
 !/studio/dist/**
+
+dora/*

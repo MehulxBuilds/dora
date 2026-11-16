@@ -705,10 +705,8 @@ MIT
 Install the CLI once from this checkout:
 
 ```sh
-go install ./cli/cmd/dora
+go install github.com/MehulxBuilds/dora/cli/cmd/dora@latest
 ```
-
-This installs an executable named `dora` in Go's binary directory (`GOBIN`, or `GOPATH/bin` by default). Add that directory to your PATH if your shell cannot find `dora`. Once this version is published, install from anywhere with `go install github.com/MehulxBuilds/dora/cli/cmd/dora@latest`.
 
 Run from the root of your own application:
 
