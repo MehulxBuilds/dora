@@ -1,1 +1,8 @@
-main.go
+/main.go
+node_modules/
+.env
+/dora.exe
+/cli.exe
+# Embed the compiled Studio UI in Go builds.
+!/studio/dist/
+!/studio/dist/**

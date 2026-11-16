@@ -151,6 +151,11 @@ func (w *wal) appendBatch(ops []Operation) error {
 // Close() saves a snapshot and truncates the WAL. This protects against
 // a second crash before Close(): the entries can be replayed again.
 func loadWALEntries(path string) ([]Operation, error) {
+	return readWALEntries(path, true)
+}
+
+// readWALEntries can recover a view without repairing or opening files for write.
+func readWALEntries(path string, repair bool) ([]Operation, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -215,7 +220,7 @@ func loadWALEntries(path string) ([]Operation, error) {
 
 	// If a partial entry was found, truncate the file to remove it.
 	// The valid entries remain intact for crash safety.
-	if needsRepair {
+	if needsRepair && repair {
 		if err := os.Truncate(path, int64(validEnd)); err != nil {
 			return nil, fmt.Errorf("WAL repair: %w", err)
 		}

@@ -580,3 +580,36 @@ Always update AGENTS.md and README.md at the end of implementation work to descr
 - A same-name definition with a different prefix or field returns `ErrIndexConflict`. CreateIndex retains strict `ErrIndexExists` semantics.
 - `main.go` uses EnsureIndex and keeps the index for subsequent runs rather than dropping it at the end.
 - `TestEnsureIndexRestart` verifies reopen, lookup, unchanged WAL/Seq on reuse, conflicts, strict CreateIndex, and invalid/closed guards.
+
+## Phase 13 - Dora Studio (DONE)
+
+- Root `cli/` contains CLI code; `cli/cmd/dora/main.go` is the sole executable entry point for both development and installation. `cli/server` is an importable local HTTP server; `studio/` contains React/TypeScript/Vite source and the embedded compiled dist/ assets.
+- CLI accepts --path (default ./dora), --port (default 7432, zero chooses an available port), --no-open, and an optional explicit file path. It opens the browser after binding, prints the URL, and gracefully shuts down on Ctrl+C. The default discovery root is <cwd>/dora; --path selects a directory. Explicit file paths are exact and do not prepend dora/.
+- `engine/inspect.go`: DB.Inspect captures a detached consistent view under RLock; InspectFile reads snapshot + WAL without opening a DB, writing, repairing, truncating, creating directories, or checkpointing. Offline inspection requires the owning application to be stopped; there is no inter-process file lock.
+- WAL parsing shares readWALEntries(path, repair). Normal recovery uses repair=true; inspection uses false and leaves incomplete tails intact. Semantic corruption remains an error.
+- Inspection exposes detached Records, sorted Indexes, Seq, Hash, and a read-only Lookup scanning the detached records. Mutating returned containers does not affect DB state.
+- Live integration: server.Start(ctx, db, server.Options{Port:7432,Name:"app.db"}); the server never closes the caller's DB. Each request captures a new view, so consistency is per request, not across the browser session.
+- GET/HEAD endpoints: /api/overview (metadata, key/type/preview summaries, indexes), /api/record?key=..., /api/lookup?name=...&value=<JSON>. GET does not perform mutations. Errors use JSON; non-read methods return 405; unknown endpoints return 404.
+- Local listener only (127.0.0.1). Handler checks loopback Host, rejects foreign Origin and cross-site fetch metadata, serves no CORS headers, uses no-store caching and restrictive content security headers.
+- UI: record table, case-insensitive key search, prefix namespace filters, 50-row pagination, JSON inspector, clickable references, index definitions/exact-match lookup, refresh, errors/empty states, mode/Seq/hash metadata. No mutation controls.
+- Frontend build: cd studio; bun install --frozen-lockfile; bun run build (npm run build also works with installed dependencies). studio/assets.go embeds dist; generated assets are tracked and rebuilt with UI source changes. No Node.js runtime needed by end users. Vite proxies /api to 127.0.0.1:7432 for development.
+- Inspection and HTTP tests verify no file changes (including partial WAL tails), detached snapshots, index recovery, mutation/origin rejection, reference reads, error paths and live server cancellation without closing the DB.
+- Limits: all key summaries are fetched; full inspection copies/hashes state; detached lookup scans records. No file locking or automatic polling. Browser UI automation unavailable in this session; frontend compilation and HTTP integration are verified.
+
+Studio verification: frontend TypeScript/Vite build, `go test ./... -count=1`, `go vet ./...`, `go build ./...`, and real CLI HTTP smoke passed. CLI smoke confirmed embedded assets and record inspection, with snapshot/WAL SHA-256 hashes unchanged.
+
+## Source formatting
+
+Studio TS/TSX/CSS/HTML uses Prettier formatting (2-space indentation, single quotes, no semicolons, 100-column print width). Go source uses gofmt. Keep source readable; generated studio/dist assets remain minified.
+
+## Studio CLI directory discovery
+
+- Canonical installed command: `dora studio`. Install from checkout with `go install ./cli/cmd/dora`; ensure GOBIN (or GOPATH/bin) is on PATH. Published install path: github.com/MehulxBuilds/dora/cli/cmd/dora@latest.
+- Command logic lives in cli/cmd (package command). The sole entry point, cli/cmd/dora/main.go, calls command.Run and handles process exit. Development uses `go run ./cli/cmd/dora studio`; there is no duplicate cli/main.go entry point.
+- Default discovery root: <current-working-directory>/dora. `--path <directory>` accepts absolute or relative overrides. Optional positional files remain supported for compatibility, but cannot be combined with --path.
+- Discovery recursively includes .db/.json/.dora snapshots and WAL-backed filenames, deduplicates snapshot/WAL pairs, skips symlink entries and temporary files, validates candidate databases, sorts relative display names, and errors without creating missing/empty directories. Restart to discover added files.
+- server.Options.Databases supplies catalog sources. GET /api/databases lists names; db=<catalog-name> selects a source for overview, record and lookup. Unknown names return 404; request parameters cannot open arbitrary filesystem paths.
+- React shows a database selector for multiple sources and resets filters, selections and lookup state when switching. Record/reference/lookup requests stay scoped to the selected database.
+- Tests cover default/custom/nested/WAL-only discovery, deduplication, errors and argument handling, catalog routing, and rejection of arbitrary database paths.
+
+Directory discovery verification: frontend build, Go tests/vet/build and CLI smoke passed. The compiled dora executable was run from a separate application root using both default dora/ discovery and an absolute --path override; database selection worked and all file hashes remained unchanged.

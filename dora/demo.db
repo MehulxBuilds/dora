@@ -1,0 +1,16 @@
+{
+  "\u0000_indexes": {
+    "users_email": {
+      "field": "email",
+      "prefix": "user:"
+    }
+  },
+  "\u0000_seq": 9,
+  "test": "test",
+  "user:1": {
+    "email": "mehul@example.com"
+  },
+  "user:2": {
+    "email": "mehul@example.com"
+  }
+}

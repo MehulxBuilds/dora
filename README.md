@@ -700,3 +700,64 @@ It creates a missing index and reuses an existing matching definition without re
 ## License
 
 MIT
+## Dora Studio (read-only)
+
+Install the CLI once from this checkout:
+
+```sh
+go install ./cli/cmd/dora
+```
+
+This installs an executable named `dora` in Go's binary directory (`GOBIN`, or `GOPATH/bin` by default). Add that directory to your PATH if your shell cannot find `dora`. Once this version is published, install from anywhere with `go install github.com/MehulxBuilds/dora/cli/cmd/dora@latest`.
+
+Run from the root of your own application:
+
+```sh
+dora studio
+```
+
+Studio discovers databases under `<current-working-directory>/dora/` and opens http://127.0.0.1:7432. The default is your project's `dora` folder, not an absolute filesystem `/dora` directory. For another location:
+
+```sh
+dora studio --path ./storage/dora
+dora studio --path /absolute/path/to/dora-dir
+```
+
+`--path` is a directory. Studio discovers `.db`, `.json`, `.dora` files and databases with a `.wal`, including nested directories. The sidebar offers a database selector when multiple databases are found. Symlink entries and temporary files are skipped. Missing/empty directories and invalid database files produce actionable errors; Studio never creates them. Restart Studio to discover files added after launch.
+
+The previous explicit-file form remains supported (`dora studio dora/demo.db`), including files with custom extensions. Do not combine an explicit file with `--path`. Use `--no-open` to skip browser launch, `--port 7433` to change the port, or `--port 0` to choose an available port. Flags can appear before or after the file. During development, run `go run ./cli/cmd/dora studio` from the repository root; the installed command works from any application directory.
+
+The UI provides key search, namespace filters, 50-row pages, formatted JSON, clickable references, index definitions and exact-match lookups. Enter lookup strings as JSON strings (including quotes). Sequence and data hash are shown alongside connection mode. Refresh rereads the selected database's files or captures a new live view.
+
+Offline inspection reads the snapshot and replays valid WAL operations in memory. It never opens files for writing, repairs an incomplete WAL tail, creates database files, or checkpoints state. Stop the owning application before using offline mode: there is no inter-process locking to make simultaneous file inspection consistent.
+
+For a running application, serve Studio through its existing DB instead:
+
+```go
+import (
+    "log"
+
+    "github.com/MehulxBuilds/dora/cli/server"
+)
+
+// Run alongside application work. Cancel ctx to stop Studio.
+go func() {
+    err := server.Start(ctx, db, server.Options{
+        Port: 7432,
+        Name: "app.db",
+        Ready: func(address string) { log.Println("Dora Studio:", address) },
+    })
+    if err != nil {
+        log.Println(err)
+    }
+}()
+// ctx is an application-managed context.Context.
+```
+
+Each live API request captures a consistent detached view under the DB read lock. The server does not close your DB. Bind is restricted to loopback; HTTP only exposes reads, rejects mutation methods and cross-origin requests, and sends no CORS permission headers. No editing, deleting or index-creation controls are exposed.
+
+The compiled React + TypeScript frontend is embedded with Go's `go:embed`; end users do not need Node.js. For frontend changes, build `studio/` first (`bun install --frozen-lockfile` then `bun run build`, or `npm run build` with installed dependencies). Commit `studio/dist/` with source changes so normal Go builds work from a clean checkout. See `studio/README.md` for the Vite development proxy workflow.
+
+Current limits: the overview loads all key summaries and inspections copy/hash state per request; detached lookup scans the captured records. Live values may change between separate requests. Offline mode has the existing snapshot/WAL replay limitations described above. Studio is intended for local small embedded databases.
+
+Studio source uses consistent 2-space indentation and expanded JSX/CSS; Go source uses `gofmt`. Generated `studio/dist/` bundles remain minified for distribution.
